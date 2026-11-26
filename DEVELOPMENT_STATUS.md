@@ -454,6 +454,29 @@ The third option — silently running the pipeline inside the web request — wa
 make a misconfigured production deploy look healthy while blocking a request thread for minutes,
 which is the exact failure this change exists to remove.
 
+### Review, rejection and version restore
+
+A rendered clip is frozen. It cannot be rendered over: a file a person has already judged must not
+change underneath them. Rejecting is what grants permission to render again, and it requires a
+reason — a refusal nobody can act on is not recorded as one.
+
+```
+render                  -> 201, v1, QA_PASSED, publishable true
+render again            -> 409 clip_not_renderable        (frozen)
+reject {}               -> 422                             (no reason given)
+reject {"reason": "  "} -> 422                             (blank reason)
+reject {reason}         -> 200, REJECTED, publishable false, reason stored, metadata.rejected_at
+render                  -> 201, v2                        (the rejection unlocked it)
+versions                -> [2: 2573438 B, 1: 2573438 B]    (both kept, both with sha256)
+restore v1              -> 200, current_version_id = v1, state QA_PASSED
+restore v1 again        -> 409 already_current
+versions after restore  -> 2                              (restore deletes nothing)
+```
+
+Restore is a pointer move, not a re-encode: every version is immutable and its file is still in
+storage, which is the whole reason the version table is append-only. A version id is reachable only
+through its own clip and workspace, so passing another clip's version id is a 404, not a 403.
+
 ### Bugs found while building this (all fixed)
 
 1. **A job left dangling in `PENDING` forever.** When a retried job found an existing transcript it
@@ -515,9 +538,13 @@ captions burned from the word timings the ASR recorded.
 - `app/api/v1/clips.py` — 8 routes: `POST .../generate-clips`, `GET .../clips`,
   `GET .../clips/{id}`, `POST .../clips/{id}/render`, `GET .../clips/{id}/versions`,
   `GET .../clips/{id}/render-plan`, `GET .../clips/{id}/captions`, `GET .../clips/{id}/download`.
+- `app/api/v1/clips.py` also carries **reject** and **version restore**: a rendered clip is frozen
+  until a human rejects it with a reason, and restoring an earlier version moves a pointer rather
+  than re-encoding, because versions are immutable.
 - `app/db/repositories.py` — `ClipRepository`; `app/api/schemas.py` — the clip response models.
 
-The implemented surface is now **34 operations / 30 paths / 34 schemas**. The reviewed contract in
+The implemented surface is now **36 operations / 32 paths / 36 schemas** (reject and version
+restore were added after the first pass; see below). The reviewed contract in
 `docs/openapi.json` is unchanged at 62 operations / 53 paths / 43 schemas.
 
 ### Live evidence (real FFmpeg, real libass, real Whisper output, real PostgreSQL)
@@ -551,6 +578,29 @@ The rendered file was then re-probed independently (`ffprobe` on the stored byte
 
 A frame was extracted and looked at, which is how the two geometry bugs below were found.
 
+### Review, rejection and version restore
+
+A rendered clip is frozen. It cannot be rendered over: a file a person has already judged must not
+change underneath them. Rejecting is what grants permission to render again, and it requires a
+reason — a refusal nobody can act on is not recorded as one.
+
+```
+render                  -> 201, v1, QA_PASSED, publishable true
+render again            -> 409 clip_not_renderable        (frozen)
+reject {}               -> 422                             (no reason given)
+reject {"reason": "  "} -> 422                             (blank reason)
+reject {reason}         -> 200, REJECTED, publishable false, reason stored, metadata.rejected_at
+render                  -> 201, v2                        (the rejection unlocked it)
+versions                -> [2: 2573438 B, 1: 2573438 B]    (both kept, both with sha256)
+restore v1              -> 200, current_version_id = v1, state QA_PASSED
+restore v1 again        -> 409 already_current
+versions after restore  -> 2                              (restore deletes nothing)
+```
+
+Restore is a pointer move, not a re-encode: every version is immutable and its file is still in
+storage, which is the whole reason the version table is append-only. A version id is reachable only
+through its own clip and workspace, so passing another clip's version id is a 404, not a 403.
+
 ### Bugs found while building this (all fixed)
 
 1. **Captions covered the middle of the frame.** `per_cue` was computed as
@@ -573,13 +623,19 @@ A frame was extracted and looked at, which is how the two geometry bugs below we
 6. **A 2.9 GB model cache had been left inside the repo** (`backend/models/`), invisible to
    `git status --short` only until it was noticed in the file list. Removed, and the path is now
    gitignored.
-7. **`clips.meta` does not exist.** The DDL column is `metadata`, but `metadata` is taken by
+7. **`ctx.user_id` does not exist** — the workspace context object exposes `ctx.user`, so the
+   reject route raised `AttributeError` and returned 500 on the happy path. Caught by running the
+   cycle against the live API before writing its test.
+8. **`ClipService(db)` was constructed without its settings and storage arguments** in the two new
+   routes: the service has no defaults for them by design, so the route failed at call time rather
+   than at import time. Both now go through the shared `_service(db)` factory.
+9. **`clips.meta` does not exist.** The DDL column is `metadata`, but `metadata` is taken by
    SQLAlchemy's schema registry on a declarative class (and assigning it raises), so the mapped
    attribute is `meta` with `mapped_column("metadata", ...)`.
-8. **`Mapped[bytes | None]` could not be resolved** on `ClipVersion.sha256`: inside a `Mapped[]`
+10. **`Mapped[bytes | None]` could not be resolved** on `ClipVersion.sha256`: inside a `Mapped[]`
    annotation the name `bytes` resolves against the enclosing class's own `bytes` column. Annotated
    as `Mapped[LargeBinary | None]`.
-9. The new `template_dir` setting was missing from `.env.example`, caught by `phase0_verify.sh` —
+11. The new `template_dir` setting was missing from `.env.example`, caught by `phase0_verify.sh` —
    the same gate that caught `job_stuck_after_seconds` in §4C.
 
 ### What is deliberately not claimed
@@ -587,9 +643,10 @@ A frame was extracted and looked at, which is how the two geometry bugs below we
 - **The live fixture happens to cut on clean word boundaries**, so its render plan shows
   `start_delta_ms: 0, end_delta_ms: 0`. The nudge path is exercised by an integration test that
   moves a stored window 40 ms into a word and asserts the cut snaps back and the reason is recorded.
-- **No re-render of a reviewed clip.** Only `DRAFT` and `QA_FAILED` clips render; a `QA_PASSED` clip
-  returns 409. There is no "reject and re-render" endpoint yet, so version 2 is currently
-  unreachable through the API even though the versioning machinery supports it.
+- **Regeneration produces the same cut.** A rejected clip can be rendered again, but `regenerate`
+  (a shorter window, a different hook) is not implemented — the moment's stored window is the only
+  one that can be rendered. Version 2 is therefore a fresh encode of the same edit, useful for
+  proving the versioning and for recovering from a render fault, not a new creative choice.
 - **No subjective/visual QA on the rendered clip itself.** `QA_PASSED` here means "the render was
   verified structurally", not "the clip looks good". The Phase 2 visual metrics have not been
   reused as the QC report yet.
@@ -663,8 +720,9 @@ anywhere in the output.
    for `analysis.sweep_stuck`, and genuine mid-stage checkpointing if true resumability is wanted
    (today a retry restarts the analysis, it does not resume it).
 3. ~~**Clip rendering.** Cut, reframe to 9:16, burn captions from the stored word timings, persist
-   `clips` + `clip_versions`.~~ **Done — see §4D.** Remaining: apply the word-gap nudge at the
-   render call site, and a reject/re-render path so a reviewed clip can be re-cut.
+   `clips` + `clip_versions`.~~ **Done — see §4D**, including review, rejection and version
+   restore. Remaining: `regenerate` with a different window/variant, `approve`, and reusing the
+   Phase 2 visual metrics as a real quality report.
 4. **Quality check** — reuse the Phase 2 visual metrics as the objective half of the QC report.
 5. **YouTube OAuth and publish** — needs real credentials; until then the honest
    `youtube_not_configured` path stays.

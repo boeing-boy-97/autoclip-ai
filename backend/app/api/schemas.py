@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import uuid
 from datetime import datetime
-from typing import Any
+from typing import Annotated, Any
 
 from pydantic import AliasChoices, BaseModel, ConfigDict, Field, model_validator
 
@@ -539,3 +539,20 @@ class CaptionsOut(BaseModel):
     warnings: list[str] = []
     cues: list[CaptionCueOut]
     vtt: str
+
+
+class ClipRejectIn(BaseModel):
+    """A rejection must be explainable.
+
+    `reason` is required: a clip rejected with no stated reason cannot be acted on by whoever
+    re-renders it, so the API refuses the request rather than storing a blank refusal.
+    """
+
+    reason: Annotated[str, Field(min_length=3, max_length=2000)]
+
+
+class ClipRestoreOut(BaseModel):
+    clip: ClipOut
+    restored_version_id: uuid.UUID
+    previous_version_id: uuid.UUID | None = None
+    note: str = "no re-encode: versions are immutable and already in storage"

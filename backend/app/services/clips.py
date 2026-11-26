@@ -14,6 +14,7 @@ silently replacing it.
 from __future__ import annotations
 
 import contextlib
+import datetime
 import logging
 import shutil
 import uuid
@@ -52,7 +53,14 @@ logger = logging.getLogger(__name__)
 
 # Only clips in these states may be re-rendered without an explicit force. A rendered clip that
 # someone approved should not be silently replaced.
-_RERENDERABLE_STATES = frozenset({"DRAFT", "QA_FAILED"})
+# A rejected clip is re-renderable: the rejection is what grants permission to replace the file.
+_RERENDERABLE_STATES = frozenset({"DRAFT", "QA_FAILED", "REJECTED"})
+# States from which "reject" makes no sense: nothing to look at, or already refused.
+_UNREJECTABLE_STATES = frozenset({"DRAFT", "RENDERING", "REJECTED", "ARCHIVED"})
+
+
+def _now_iso() -> str:
+    return datetime.datetime.now(datetime.UTC).isoformat()
 
 
 class ClipError(RuntimeError):
@@ -371,6 +379,83 @@ class ClipService:
             shutil.rmtree(scratch, ignore_errors=True)
 
     # ------------------------------------------------------------------ helpers
+    def reject(
+        self,
+        *,
+        workspace_id: uuid.UUID,
+        clip_id: uuid.UUID,
+        reason: str,
+        user_id: uuid.UUID | None = None,
+    ) -> Clip:
+        """Record that a human looked at this clip and refused it.
+
+        A rejection is not a re-render. It is the *permission* to re-render: without it a reviewed
+        clip is frozen, because silently overwriting a file somebody already judged would destroy
+        the record of what they judged. The rejected version stays in `clip_versions` forever.
+        """
+        clip = self.clips.get(workspace_id=workspace_id, clip_id=clip_id)
+        if clip.state in _UNREJECTABLE_STATES:
+            raise ClipError(
+                "clip_not_rejectable",
+                f"a clip in {clip.state.lower()} cannot be rejected",
+                status_code=409,
+            )
+        if not reason or not reason.strip():
+            # A rejection with no reason cannot be acted on, so it is not accepted.
+            raise ClipError(
+                "reason_required",
+                "a rejection must say what was wrong with the clip",
+                status_code=422,
+            )
+        clip.state = "REJECTED"
+        clip.rejection_reason = reason.strip()[:2000]
+        clip.publishable = False
+        clip.meta = {
+            **(clip.meta or {}),
+            "rejected_at": _now_iso(),
+            "rejected_by": str(user_id) if user_id else None,
+        }
+        self.db.flush()
+        logger.info("clip rejected", extra={"clip_id": str(clip_id)})
+        return clip
+
+    def restore_version(
+        self,
+        *,
+        workspace_id: uuid.UUID,
+        clip_id: uuid.UUID,
+        version_id: uuid.UUID,
+        user_id: uuid.UUID | None = None,  # noqa: ARG002 - audit attribution, not used yet
+    ) -> Clip:
+        """Point `current_version_id` back at an earlier render.
+
+        No re-encode happens: every version is immutable and its file is still in storage, so
+        restoring is a pointer move. That is the whole reason versions are append-only.
+        """
+        clip = self.clips.get(workspace_id=workspace_id, clip_id=clip_id)
+        version = self.clips.get_version(
+            workspace_id=workspace_id, clip_id=clip_id, version_id=version_id
+        )
+        if clip.current_version_id == version.id:
+            raise ClipError(
+                "already_current", "that version is already the current one", status_code=409
+            )
+        previous = clip.current_version_id
+        clip.current_version_id = version.id
+        clip.state = "QA_PASSED" if version.video_asset_id else clip.state
+        clip.publishable = bool(version.video_asset_id)
+        clip.meta = {
+            **(clip.meta or {}),
+            "restored_from_version_id": str(previous) if previous else None,
+            "restored_to_version_no": version.version_no,
+        }
+        self.db.flush()
+        logger.info(
+            "clip version restored",
+            extra={"clip_id": str(clip_id), "version_no": version.version_no},
+        )
+        return clip
+
     def _fail(
         self,
         job_id: uuid.UUID,

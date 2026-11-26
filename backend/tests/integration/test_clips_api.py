@@ -296,6 +296,145 @@ class TestRendering:
         assert "no signed URL" in body["note"]
 
 
+class TestRejectAndRestore:
+    """A reviewed clip must never be silently replaced, and a refusal must be recorded."""
+
+    def rendered(self, alice: Actor, ready_project: str) -> dict:
+        generate(alice, ready_project)
+        clip = list_clips(alice, ready_project)[0]
+        resp = alice.client.post(
+            f"/api/v1/workspaces/{alice.workspace_id}/clips/{clip['id']}/render",
+            headers=alice.headers,
+        )
+        assert resp.status_code == 201, resp.text
+        return clip
+
+    def test_reject_requires_a_reason(self, alice: Actor, ready_project: str):
+        clip = self.rendered(alice, ready_project)
+        url = f"/api/v1/workspaces/{alice.workspace_id}/clips/{clip['id']}/reject"
+        assert alice.client.post(url, json={}, headers=alice.headers).status_code == 422
+        assert (
+            alice.client.post(url, json={"reason": "   "}, headers=alice.headers).status_code
+            == 422
+        )
+
+    def test_rejection_is_recorded_and_unpublishes(self, alice: Actor, ready_project: str):
+        clip = self.rendered(alice, ready_project)
+        reason = "caption sits over the speaker's face"
+        resp = alice.client.post(
+            f"/api/v1/workspaces/{alice.workspace_id}/clips/{clip['id']}/reject",
+            json={"reason": reason},
+            headers=alice.headers,
+        )
+        assert resp.status_code == 200, resp.text
+        body = resp.json()
+        assert body["state"] == "REJECTED"
+        assert body["publishable"] is False
+        assert body["rejection_reason"] == reason
+
+    def test_rejecting_twice_is_a_conflict(self, alice: Actor, ready_project: str):
+        clip = self.rendered(alice, ready_project)
+        url = f"/api/v1/workspaces/{alice.workspace_id}/clips/{clip['id']}/reject"
+        first = alice.client.post(url, json={"reason": "no good"}, headers=alice.headers)
+        assert first.status_code == 200, first.text
+        second = alice.client.post(url, json={"reason": "still no good"}, headers=alice.headers)
+        assert second.status_code == 409
+        assert second.json()["code"] == "clip_not_rejectable"
+
+    def test_render_is_frozen_until_rejected(self, alice: Actor, ready_project: str):
+        clip = self.rendered(alice, ready_project)
+        url = f"/api/v1/workspaces/{alice.workspace_id}/clips/{clip['id']}/render"
+        # A rendered clip nobody has refused must not be overwritten.
+        assert alice.client.post(url, headers=alice.headers).status_code == 409
+
+        alice.client.post(
+            f"/api/v1/workspaces/{alice.workspace_id}/clips/{clip['id']}/reject",
+            json={"reason": "framing is off"},
+            headers=alice.headers,
+        )
+        again = alice.client.post(url, headers=alice.headers)
+        assert again.status_code == 201, again.text
+        assert again.json()["version_no"] == 2
+
+    def test_rerender_keeps_the_previous_version(self, alice: Actor, ready_project: str):
+        clip = self.rendered(alice, ready_project)
+        alice.client.post(
+            f"/api/v1/workspaces/{alice.workspace_id}/clips/{clip['id']}/reject",
+            json={"reason": "wrong cut"},
+            headers=alice.headers,
+        )
+        alice.client.post(
+            f"/api/v1/workspaces/{alice.workspace_id}/clips/{clip['id']}/render",
+            headers=alice.headers,
+        )
+        versions = alice.client.get(
+            f"/api/v1/workspaces/{alice.workspace_id}/clips/{clip['id']}/versions",
+            headers=alice.headers,
+        ).json()
+        assert [v["version_no"] for v in versions] == [2, 1], "both renders must survive"
+        assert all(v["sha256"] for v in versions)
+
+    def test_restore_moves_the_pointer_and_deletes_nothing(self, alice: Actor, ready_project: str):
+        clip = self.rendered(alice, ready_project)
+        base = f"/api/v1/workspaces/{alice.workspace_id}/clips/{clip['id']}"
+        alice.client.post(f"{base}/reject", json={"reason": "test"}, headers=alice.headers)
+        alice.client.post(f"{base}/render", headers=alice.headers)
+        versions = alice.client.get(f"{base}/versions", headers=alice.headers).json()
+        first = next(v for v in versions if v["version_no"] == 1)
+
+        resp = alice.client.post(
+            f"{base}/versions/{first['id']}/restore", headers=alice.headers
+        )
+        assert resp.status_code == 200, resp.text
+        assert resp.json()["clip"]["current_version_id"] == first["id"]
+        assert resp.json()["previous_version_id"] is not None
+        assert "no re-encode" in resp.json()["note"]
+
+        after = alice.client.get(base, headers=alice.headers).json()
+        assert after["current_version_id"] == first["id"]
+        assert len(alice.client.get(f"{base}/versions", headers=alice.headers).json()) == 2
+
+    def test_restoring_the_current_version_is_a_conflict(self, alice: Actor, ready_project: str):
+        clip = self.rendered(alice, ready_project)
+        base = f"/api/v1/workspaces/{alice.workspace_id}/clips/{clip['id']}"
+        current = alice.client.get(base, headers=alice.headers).json()["current_version_id"]
+        resp = alice.client.post(f"{base}/versions/{current}/restore", headers=alice.headers)
+        assert resp.status_code == 409
+        assert resp.json()["code"] == "already_current"
+
+    def test_another_clips_version_cannot_be_restored(self, alice: Actor, ready_project: str):
+        """A version id is only meaningful under its own clip; sharing it must not cross clips."""
+        clip = self.rendered(alice, ready_project)
+        base = f"/api/v1/workspaces/{alice.workspace_id}/clips/{clip['id']}"
+        version_id = alice.client.get(base, headers=alice.headers).json()["current_version_id"]
+
+        other = alice.client.post(
+            f"/api/v1/workspaces/{alice.workspace_id}/projects",
+            json={"name": "Other", "clips_requested": 1},
+            headers=alice.headers,
+        ).json()["id"]
+        with need_speech().open("rb") as fh:
+            alice.client.post(
+                f"/api/v1/workspaces/{alice.workspace_id}/projects/{other}/sources",
+                files={"file": ("real_speech.mp4", fh, "video/mp4")},
+                data={"rights_basis": "original", "rights_statement": RIGHTS},
+                headers=alice.headers,
+            )
+        alice.client.post(
+            f"/api/v1/workspaces/{alice.workspace_id}/projects/{other}/analyze",
+            headers=alice.headers,
+        )
+        generate(alice, other)
+        other_clip = list_clips(alice, other)[0]
+
+        resp = alice.client.post(
+            f"/api/v1/workspaces/{alice.workspace_id}/clips/{other_clip['id']}"
+            f"/versions/{version_id}/restore",
+            headers=alice.headers,
+        )
+        assert resp.status_code == 404
+
+
 class TestBoundaryNudge:
     def test_a_cut_inside_a_word_is_moved_and_recorded(self, alice: Actor, ready_project: str):
         """The fixture's real moment happens to start on a clean boundary, so the nudge path is

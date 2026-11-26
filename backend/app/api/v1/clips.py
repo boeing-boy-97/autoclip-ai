@@ -26,7 +26,9 @@ from app.api.schemas import (
     ClipGenerationOut,
     ClipOut,
     ClipPage,
+    ClipRejectIn,
     ClipRenderOut,
+    ClipRestoreOut,
     ClipVersionOut,
 )
 from app.core.config import get_settings
@@ -365,3 +367,73 @@ def download_clip(
         "download_url": None,
         "note": "local storage backend: no signed URL is available; fetch the storage key directly",
     }
+
+
+@router.post(
+    "/workspaces/{workspace_id}/clips/{clip_id}/reject",
+    response_model=ClipOut,
+    summary="Reject Clip",
+)
+def reject_clip(
+    workspace_id: uuid.UUID,
+    clip_id: uuid.UUID,
+    payload: ClipRejectIn,
+    db: DbDep,
+    ctx: WorkspaceEditor,
+) -> ClipOut:
+    """Refuse a rendered clip, with a reason, and allow it to be rendered again.
+
+    Rejecting is the only way a reviewed clip becomes re-renderable. That is deliberate: an
+    approved or simply unreviewed file is never overwritten, so the version a person judged is
+    always still there afterwards.
+    """
+    service = _service(db)
+    try:
+        clip = service.reject(
+            workspace_id=workspace_id,
+            clip_id=clip_id,
+            reason=payload.reason,
+            user_id=ctx.user.id,
+        )
+    except ClipError as exc:
+        raise ApiError(exc.code, exc.detail, status_code=exc.status_code) from exc
+    db.commit()
+    db.refresh(clip)
+    return ClipOut.model_validate(clip)
+
+
+@router.post(
+    "/workspaces/{workspace_id}/clips/{clip_id}/versions/{version_id}/restore",
+    response_model=ClipRestoreOut,
+    summary="Restore Clip Version",
+)
+def restore_clip_version(
+    workspace_id: uuid.UUID,
+    clip_id: uuid.UUID,
+    version_id: uuid.UUID,
+    db: DbDep,
+    ctx: WorkspaceEditor,
+) -> ClipRestoreOut:
+    """Make an earlier render the current one again.
+
+    No re-encode: every version is immutable and its file is still in storage, so this is a
+    pointer move. Restoring does not delete the version it replaces.
+    """
+    service = _service(db)
+    previous = service.clips.get(workspace_id=workspace_id, clip_id=clip_id).current_version_id
+    try:
+        clip = service.restore_version(
+            workspace_id=workspace_id,
+            clip_id=clip_id,
+            version_id=version_id,
+            user_id=ctx.user.id,
+        )
+    except ClipError as exc:
+        raise ApiError(exc.code, exc.detail, status_code=exc.status_code) from exc
+    db.commit()
+    db.refresh(clip)
+    return ClipRestoreOut(
+        clip=ClipOut.model_validate(clip),
+        restored_version_id=version_id,
+        previous_version_id=previous,
+    )

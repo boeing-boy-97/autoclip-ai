@@ -573,6 +573,22 @@
         "title": "ClipPage",
         "type": "object"
       },
+      "ClipRejectIn": {
+        "description": "A rejection must be explainable.\n\n`reason` is required: a clip rejected with no stated reason cannot be acted on by whoever\nre-renders it, so the API refuses the request rather than storing a blank refusal.",
+        "properties": {
+          "reason": {
+            "maxLength": 2000,
+            "minLength": 3,
+            "title": "Reason",
+            "type": "string"
+          }
+        },
+        "required": [
+          "reason"
+        ],
+        "title": "ClipRejectIn",
+        "type": "object"
+      },
       "ClipRenderOut": {
         "properties": {
           "bytes": {
@@ -636,6 +652,41 @@
           "render_seconds"
         ],
         "title": "ClipRenderOut",
+        "type": "object"
+      },
+      "ClipRestoreOut": {
+        "properties": {
+          "clip": {
+            "$ref": "#/components/schemas/ClipOut"
+          },
+          "note": {
+            "default": "no re-encode: versions are immutable and already in storage",
+            "title": "Note",
+            "type": "string"
+          },
+          "previous_version_id": {
+            "anyOf": [
+              {
+                "format": "uuid",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Previous Version Id"
+          },
+          "restored_version_id": {
+            "format": "uuid",
+            "title": "Restored Version Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "clip",
+          "restored_version_id"
+        ],
+        "title": "ClipRestoreOut",
         "type": "object"
       },
       "ClipVersionOut": {
@@ -2980,6 +3031,102 @@
         ]
       }
     },
+    "/api/v1/workspaces/{workspace_id}/clips/{clip_id}/reject": {
+      "post": {
+        "description": "Refuse a rendered clip, with a reason, and allow it to be rendered again.\n\nRejecting is the only way a reviewed clip becomes re-renderable. That is deliberate: an\napproved or simply unreviewed file is never overwritten, so the version a person judged is\nalways still there afterwards.",
+        "operationId": "reject_clip_api_v1_workspaces__workspace_id__clips__clip_id__reject_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "workspace_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Workspace Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "clip_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Clip Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          },
+          {
+            "in": "cookie",
+            "name": "ac_session",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Ac Session"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ClipRejectIn"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ClipOut"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Reject Clip",
+        "tags": [
+          "Clips"
+        ]
+      }
+    },
     "/api/v1/workspaces/{workspace_id}/clips/{clip_id}/render": {
       "post": {
         "description": "Cut, reframe and caption one clip into a new immutable version.\n\nRuns in-request today (the render is bounded and seconds-long for short clips). The job row is\nstill written, so progress and failure are inspectable through `GET /jobs`.",
@@ -3270,6 +3417,102 @@
           }
         },
         "summary": "List Clip Versions",
+        "tags": [
+          "Clips"
+        ]
+      }
+    },
+    "/api/v1/workspaces/{workspace_id}/clips/{clip_id}/versions/{version_id}/restore": {
+      "post": {
+        "description": "Make an earlier render the current one again.\n\nNo re-encode: every version is immutable and its file is still in storage, so this is a\npointer move. Restoring does not delete the version it replaces.",
+        "operationId": "restore_clip_version_api_v1_workspaces__workspace_id__clips__clip_id__versions__version_id__restore_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "workspace_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Workspace Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "clip_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Clip Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "version_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Version Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          },
+          {
+            "in": "cookie",
+            "name": "ac_session",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Ac Session"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ClipRestoreOut"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Restore Clip Version",
         "tags": [
           "Clips"
         ]

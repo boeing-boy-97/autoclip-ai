@@ -681,6 +681,21 @@ class ClipRepository:
     def __init__(self, db: Session) -> None:
         self.db = db
 
+    def get_version(
+        self, *, workspace_id: uuid.UUID, clip_id: uuid.UUID, version_id: uuid.UUID
+    ) -> ClipVersion:
+        """A version is only reachable through its clip, which is only reachable through its
+        workspace — so a version id from another tenant is a 404, not a 403."""
+        clip = self.get(workspace_id=workspace_id, clip_id=clip_id)
+        version = self.db.scalar(
+            select(ClipVersion).where(
+                ClipVersion.id == version_id, ClipVersion.clip_id == clip.id
+            )
+        )
+        if version is None:
+            raise NotFoundError("clip_version", version_id)
+        return version
+
     def get(
         self, *, workspace_id: uuid.UUID, clip_id: uuid.UUID, with_deleted: bool = False
     ) -> Clip:
