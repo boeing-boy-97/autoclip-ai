@@ -105,6 +105,12 @@ job_status_enum = Enum(
 publish_mode_enum = Enum(
     "auto", "manual_approval", "private_review", name="publish_mode", create_type=False
 )
+moment_category_enum = Enum(
+    "hook", "surprising_fact", "educational", "business_insight", "motivational", "funny",
+    "emotional_story", "debate", "opinion", "important_question", "unexpected_answer",
+    "tutorial", "memorable_conclusion", "reaction", "other",
+    name="moment_category", create_type=False,
+)
 notification_kind_enum = Enum(
     "analysis_complete", "clips_ready", "qa_failed", "approval_needed", "publish_success",
     "publish_failed", "auth_expired", "budget_warning", "storage_warning", "system",
@@ -541,4 +547,207 @@ class UsageRecord(Base):
     __table_args__ = (
         Index("ix_usage_ws_at", "workspace_id", text("at DESC")),
         Index("ix_usage_project", "project_id"),
+    )
+
+
+# --------------------------------------------------------------------- analysis (Phase 2)
+
+
+class Transcript(Base):
+    """One ASR run. Corrections are *additional* rows, never in-place edits.
+
+    Note: no `TimestampMixin`. `transcripts` is append-only and has no `updated_at` column; adding
+    it here (as a mixin would) makes every INSERT fail with UndefinedColumn.
+
+
+    Keeping the raw provider output (`raw_json`) alongside the derived segments is what makes the
+    pipeline auditable: you can always tell what the model actually said versus what we did with it.
+    """
+
+    __tablename__ = "transcripts"
+
+    id: Mapped[uuid.UUID] = _uuid_pk()
+    project_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("projects.id", ondelete="CASCADE"), nullable=False
+    )
+    source_video_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("source_videos.id", ondelete="CASCADE"), nullable=False
+    )
+    provider: Mapped[str] = mapped_column(Text, nullable=False)
+    model: Mapped[str] = mapped_column(Text, nullable=False)
+    language: Mapped[str | None] = mapped_column(Text)
+    is_corrected: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default="false")
+    corrected_from: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("transcripts.id"))
+    word_timestamps: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, server_default="true"
+    )
+    confidence: Mapped[float | None] = mapped_column(Numeric(4, 3))
+    cost_usd: Mapped[float] = mapped_column(
+        Numeric(12, 6), nullable=False, server_default="0"
+    )
+    raw_json: Mapped[dict | None] = mapped_column(JSONB)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
+
+    __table_args__ = (Index("ix_transcripts_project", "project_id", text("created_at DESC")),)
+
+
+class Speaker(Base):
+    __tablename__ = "speakers"
+
+    id: Mapped[uuid.UUID] = _uuid_pk()
+    project_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("projects.id", ondelete="CASCADE"), nullable=False
+    )
+    label: Mapped[str] = mapped_column(Text, nullable=False)
+    display_name: Mapped[str | None] = mapped_column(Text)
+    method: Mapped[str] = mapped_column(Text, nullable=False, server_default="heuristic")
+    confidence: Mapped[float | None] = mapped_column(Numeric(4, 3))
+    color: Mapped[str | None] = mapped_column(Text)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
+
+
+class TranscriptSegment(Base):
+    """A timed utterance. `idx` preserves ordering; timings are provider-reported milliseconds."""
+
+    __tablename__ = "transcript_segments"
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    transcript_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("transcripts.id", ondelete="CASCADE"), nullable=False
+    )
+    project_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("projects.id", ondelete="CASCADE"), nullable=False
+    )
+    idx: Mapped[int] = mapped_column(Integer, nullable=False)
+    start_ms: Mapped[int] = mapped_column(Integer, nullable=False)
+    end_ms: Mapped[int] = mapped_column(Integer, nullable=False)
+    text: Mapped[str] = mapped_column(Text, nullable=False)
+    speaker_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("speakers.id"))
+    avg_logprob: Mapped[float | None] = mapped_column(Numeric(6, 4))
+    no_speech_prob: Mapped[float | None] = mapped_column(Numeric(6, 4))
+    words: Mapped[dict | None] = mapped_column(JSONB)  # [{w,s,e,p}]
+
+    __table_args__ = (
+        Index("ux_segments_transcript_idx", "transcript_id", "idx", unique=True),
+        Index("ix_segments_project_time", "project_id", "start_ms"),
+        CheckConstraint("start_ms >= 0 AND end_ms > start_ms", name="ck_segment_time"),
+    )
+
+
+class CandidateMoment(Base):
+    """A candidate clip window with the evidence that earned it its score."""
+
+    __tablename__ = "candidate_moments"
+
+    id: Mapped[uuid.UUID] = _uuid_pk()
+    project_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("projects.id", ondelete="CASCADE"), nullable=False
+    )
+    analysis_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True))
+    start_ms: Mapped[int] = mapped_column(Integer, nullable=False)
+    end_ms: Mapped[int] = mapped_column(Integer, nullable=False)
+    required_duration_ms: Mapped[int] = mapped_column(Integer, nullable=False)
+    category: Mapped[str] = mapped_column(
+        moment_category_enum, nullable=False, server_default="other"
+    )
+    hook_text: Mapped[str | None] = mapped_column(Text)
+    context_text: Mapped[str | None] = mapped_column(Text)
+    payoff_text: Mapped[str | None] = mapped_column(Text)
+    ending_text: Mapped[str | None] = mapped_column(Text)
+    rationale: Mapped[str | None] = mapped_column(Text)
+    standalone_ok: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, server_default="false"
+    )
+    selected: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default="false")
+    suppressed_reason: Mapped[str | None] = mapped_column(Text)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
+
+    __table_args__ = (
+        Index("ix_moments_project_start", "project_id", "start_ms"),
+        CheckConstraint("start_ms >= 0 AND end_ms > start_ms", name="ck_moment_time"),
+    )
+
+
+class CandidateScore(Base):
+    """Decomposed scoring for a candidate. Aggregates are stored, never recomputed implicitly."""
+
+    __tablename__ = "candidate_scores"
+
+    id: Mapped[uuid.UUID] = _uuid_pk()
+    candidate_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("candidate_moments.id", ondelete="CASCADE"), unique=True, nullable=False
+    )
+    weights_version: Mapped[str] = mapped_column(Text, nullable=False)
+    hook: Mapped[float] = mapped_column(Numeric(5, 2), nullable=False)
+    content_value: Mapped[float] = mapped_column(Numeric(5, 2), nullable=False)
+    narrative: Mapped[float] = mapped_column(Numeric(5, 2), nullable=False)
+    standalone: Mapped[float] = mapped_column(Numeric(5, 2), nullable=False)
+    audience: Mapped[float] = mapped_column(Numeric(5, 2), nullable=False)
+    emotion: Mapped[float] = mapped_column(Numeric(5, 2), nullable=False)
+    visual_quality: Mapped[float] = mapped_column(Numeric(5, 2), nullable=False)
+    audio_quality: Mapped[float] = mapped_column(Numeric(5, 2), nullable=False)
+    ending_strength: Mapped[float] = mapped_column(Numeric(5, 2), nullable=False)
+    clarity: Mapped[float] = mapped_column(Numeric(5, 2), nullable=False)
+    content_potential: Mapped[float] = mapped_column(Numeric(5, 2), nullable=False)
+    technical_quality: Mapped[float] = mapped_column(Numeric(5, 2), nullable=False)
+    context_completeness: Mapped[float] = mapped_column(Numeric(5, 2), nullable=False)
+    audience_relevance: Mapped[float] = mapped_column(Numeric(5, 2), nullable=False)
+    overall: Mapped[float] = mapped_column(Numeric(5, 2), nullable=False)
+    computed_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
+
+
+class Scene(Base):
+    """A detected shot. `detector` records how it was found, so results stay comparable."""
+
+    __tablename__ = "scenes"
+
+    id: Mapped[uuid.UUID] = _uuid_pk()
+    project_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("projects.id", ondelete="CASCADE"), nullable=False
+    )
+    idx: Mapped[int] = mapped_column(Integer, nullable=False)
+    start_ms: Mapped[int] = mapped_column(Integer, nullable=False)
+    end_ms: Mapped[int] = mapped_column(Integer, nullable=False)
+    detector: Mapped[str] = mapped_column(Text, nullable=False, server_default="pyscenedetect")
+    description: Mapped[str | None] = mapped_column(Text)
+    has_on_screen_text: Mapped[bool | None] = mapped_column(Boolean)
+    thumbnail_asset_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("media_assets.id"))
+    mean_motion: Mapped[float | None] = mapped_column(Numeric(8, 4))
+
+    __table_args__ = (
+        UniqueConstraint("project_id", "idx", name="scenes_project_id_idx_key"),
+        CheckConstraint("start_ms >= 0 AND end_ms > start_ms", name="ck_scene_range"),
+    )
+
+
+class VideoAnalysis(Base):
+    """Validated analysis payload for a project. `payload` is the machine-readable record."""
+
+    __tablename__ = "video_analysis"
+
+    id: Mapped[uuid.UUID] = _uuid_pk()
+    project_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("projects.id", ondelete="CASCADE"), nullable=False
+    )
+    transcript_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("transcripts.id"))
+    schema_version: Mapped[int] = mapped_column(Integer, nullable=False, server_default="1")
+    video_summary: Mapped[str | None] = mapped_column(Text)
+    language: Mapped[str | None] = mapped_column(Text)
+    analysis_confidence: Mapped[float | None] = mapped_column(Numeric(4, 3))
+    payload: Mapped[dict] = mapped_column(JSONB, nullable=False)
+    provider: Mapped[str | None] = mapped_column(Text)
+    model: Mapped[str | None] = mapped_column(Text)
+    cost_usd: Mapped[float] = mapped_column(
+        Numeric(12, 6), nullable=False, server_default="0"
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
     )

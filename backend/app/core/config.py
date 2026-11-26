@@ -86,6 +86,11 @@ class Settings(BaseSettings):
     # ---------------------------------------------------------------- media
     ffmpeg_bin: str = "ffmpeg"
     ffprobe_bin: str = "ffprobe"
+    audio_target_lufs: float = -14.0
+    audio_true_peak_dbtp: float = -1.0
+    # Path to the scoring weights. Relative to the process working directory (the repo root in
+    # Docker, backend/ when running pytest from there).
+    scoring_config_path: str = "../config/scoring.yaml"
     tmp_root: str = "/tmp/autoclip"  # noqa: S108 - per-job scratch dir, cleaned in finally
     render_target_width: int = 1080
     render_target_height: int = 1920
@@ -105,6 +110,12 @@ class Settings(BaseSettings):
     asr_provider: ASRProvider = "local"
     asr_model: str = "large-v3"
     asr_device: str = "auto"
+    asr_compute_type: str = "auto"
+    asr_beam_size: int = 5
+    asr_vad_filter: bool = True
+    asr_model_dir: str = "./models/asr"  # where weights are cached; download happens once
+    openai_api_key: str | None = None
+    deepgram_api_key: str | None = None
     hf_token: str | None = None
 
     # ---------------------------------------------------------------- YouTube (optional)

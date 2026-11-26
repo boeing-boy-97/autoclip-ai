@@ -186,6 +186,7 @@ def create_app() -> FastAPI:
 
     # Routers are imported inside the factory so environment-dependent settings are read
     # first; noqa: PLC0415 is deliberate for the whole block.
+    from app.api.v1.analysis import router as analysis_router
     from app.api.v1.auth import router as auth_router
     from app.api.v1.projects import router as projects_router
     from app.api.v1.sources import router as sources_router
@@ -241,6 +242,7 @@ def create_app() -> FastAPI:
     app.include_router(system_router, prefix=s.api_prefix)
     app.include_router(projects_router, prefix=s.api_prefix)
     app.include_router(sources_router, prefix=s.api_prefix)
+    app.include_router(analysis_router, prefix=s.api_prefix)
 
     # ------------------------------------------------------------ health
     @app.get("/api/v1/health/livez", tags=["System"], summary="Liveness probe")

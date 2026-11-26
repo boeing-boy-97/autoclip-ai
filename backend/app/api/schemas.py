@@ -259,3 +259,164 @@ class DashboardSummary(BaseModel):
     recent_projects: list[ProjectOut]
     recent_activity: list[ActivityOut]
     is_empty: bool = False
+
+
+# --------------------------------------------------------------------------- analysis
+
+
+class WordOut(BaseModel):
+    w: str
+    s: int
+    e: int
+    p: float | None = None
+
+
+class TranscriptSegmentOut(ORMModel):
+    idx: int
+    start_ms: int
+    end_ms: int
+    text: str
+    speaker_id: uuid.UUID | None = None
+    avg_logprob: float | None = None
+    words: list[WordOut] | None = None
+
+
+class TranscriptOut(BaseModel):
+    id: uuid.UUID
+    provider: str
+    model: str
+    language: str | None = None
+    word_timestamps: bool = True
+    confidence: float | None = None
+    is_corrected: bool = False
+    created_at: datetime
+    duration_ms: int | None = None
+    word_count: int = 0
+    segments: list[TranscriptSegmentOut] = Field(default_factory=list)
+
+    @classmethod
+    def build(
+        cls,
+        transcript,  # noqa: ANN001
+        segments,  # noqa: ANN001
+        *,
+        duration_ms: int | None = None,
+        include_words: bool = False,
+    ) -> TranscriptOut:
+        return cls.model_validate(
+            {
+                "id": transcript.id,
+                "provider": transcript.provider,
+                "model": transcript.model,
+                "language": transcript.language,
+                "word_timestamps": transcript.word_timestamps,
+                "confidence": float(transcript.confidence) if transcript.confidence else None,
+                "is_corrected": transcript.is_corrected,
+                "created_at": transcript.created_at,
+                "duration_ms": duration_ms,
+                "word_count": sum(
+                    len(s.words or []) or len((s.text or "").split()) for s in segments
+                ),
+                "segments": [
+                    TranscriptSegmentOut.model_validate(
+                        {
+                            "idx": s.idx,
+                            "start_ms": s.start_ms,
+                            "end_ms": s.end_ms,
+                            "text": s.text,
+                            "speaker_id": s.speaker_id,
+                            "avg_logprob": (
+                                float(s.avg_logprob) if s.avg_logprob is not None else None
+                            ),
+                            "words": s.words if include_words else None,
+                        }
+                    )
+                    for s in segments
+                ],
+            }
+        )
+
+
+class CandidateScoreOut(ORMModel):
+    weights_version: str
+    hook: float
+    content_value: float
+    narrative: float
+    standalone: float
+    audience: float
+    emotion: float
+    visual_quality: float
+    audio_quality: float
+    ending_strength: float
+    clarity: float
+    content_potential: float
+    technical_quality: float
+    context_completeness: float
+    audience_relevance: float
+    overall: float
+
+
+class MomentOut(BaseModel):
+    id: uuid.UUID
+    start_ms: int
+    end_ms: int
+    duration_ms: int
+    category: str
+    hook_text: str | None = None
+    context_text: str | None = None
+    payoff_text: str | None = None
+    rationale: str | None = None
+    standalone_ok: bool = False
+    selected: bool = False
+    suppressed_reason: str | None = None
+    score: CandidateScoreOut | None = None
+
+    @classmethod
+    def build(cls, moment, score) -> MomentOut:  # noqa: ANN001
+        return cls(
+            id=moment.id,
+            start_ms=moment.start_ms,
+            end_ms=moment.end_ms,
+            duration_ms=moment.end_ms - moment.start_ms,
+            category=moment.category,
+            hook_text=moment.hook_text,
+            context_text=moment.context_text,
+            payoff_text=moment.payoff_text,
+            rationale=moment.rationale,
+            standalone_ok=moment.standalone_ok,
+            selected=moment.selected,
+            suppressed_reason=moment.suppressed_reason,
+            score=
+            CandidateScoreOut.model_validate(score)
+            if score is not None
+            else None,
+        )
+
+
+class MomentPage(BaseModel):
+    items: list[MomentOut]
+    next_cursor: str | None = None
+    total: int
+    selected_count: int
+    disclaimer: str = (
+        "Scores estimate content characteristics (hook strength, narrative completeness, "
+        "clarity) from the transcript. They are not predictions of views, reach or revenue."
+    )
+
+
+class AnalysisStatusOut(BaseModel):
+    project_id: uuid.UUID
+    status: str
+    has_transcript: bool = False
+    transcript_id: uuid.UUID | None = None
+    provider: str | None = None
+    model: str | None = None
+    language: str | None = None
+    segment_count: int = 0
+    word_count: int = 0
+    candidate_count: int = 0
+    selected_count: int = 0
+    weights_version: str | None = None
+    method: str | None = None
+    asr_configured: bool = True
+    asr_note: str | None = None

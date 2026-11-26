@@ -525,6 +525,76 @@ class JobRepository:
         rows = list(self.db.scalars(stmt.order_by(ProcessingJob.created_at.desc()).limit(limit)))
         return Page(items=rows)
 
+    def find_succeeded(self, *, input_fingerprint: str) -> ProcessingJob | None:
+        """Idempotency probe: has work with this exact fingerprint already completed?"""
+        return self.db.scalar(
+            select(ProcessingJob).where(
+                ProcessingJob.input_fingerprint == input_fingerprint,
+                ProcessingJob.status == "SUCCEEDED",
+            )
+        )
+
+    def mark_running(self, *, workspace_id: uuid.UUID, job_id: uuid.UUID) -> ProcessingJob:
+        job = self.get(workspace_id=workspace_id, job_id=job_id)
+        job.status = "RUNNING"
+        job.started_at = job.started_at or datetime.now(UTC)
+        job.heartbeat_at = datetime.now(UTC)
+        job.attempts = (job.attempts or 0) + 1
+        self.db.flush()
+        return job
+
+    def set_progress(
+        self,
+        *,
+        workspace_id: uuid.UUID,
+        job_id: uuid.UUID,
+        progress: int,
+        note: str | None = None,
+    ) -> ProcessingJob:
+        job = self.get(workspace_id=workspace_id, job_id=job_id)
+        job.progress = max(0, min(100, progress))
+        job.progress_note = note
+        job.heartbeat_at = datetime.now(UTC)
+        self.db.flush()
+        return job
+
+    def mark_succeeded(
+        self, *, workspace_id: uuid.UUID, job_id: uuid.UUID, note: str | None = None
+    ) -> ProcessingJob:
+        job = self.get(workspace_id=workspace_id, job_id=job_id)
+        job.status = "SUCCEEDED"
+        job.progress = 100
+        job.progress_note = note
+        job.finished_at = datetime.now(UTC)
+        job.error_code = None
+        job.error_detail = None
+        self.db.flush()
+        return job
+
+    def mark_failed(
+        self,
+        *,
+        workspace_id: uuid.UUID,
+        job_id: uuid.UUID,
+        code: str,
+        detail: str,
+        retryable: bool = False,
+    ) -> ProcessingJob:
+        """Record a failure.
+
+        `retryable=True` means "this *could* succeed on another attempt", so a job that has spent
+        its attempts becomes DEAD_LETTER (needs a human). A non-retryable failure — bad input,
+        no speech in the file — is FAILED immediately: retrying it would just fail again.
+        """
+        job = self.get(workspace_id=workspace_id, job_id=job_id)
+        exhausted = (job.attempts or 0) >= (job.max_attempts or 3)
+        job.status = "DEAD_LETTER" if (retryable and exhausted) else "FAILED"
+        job.error_code = code
+        job.error_detail = detail[:2000]
+        job.finished_at = datetime.now(UTC)
+        self.db.flush()
+        return job
+
 
 # --------------------------------------------------------------------------- audit
 

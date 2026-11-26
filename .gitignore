@@ -52,3 +52,10 @@ celerybeat-schedule*
 .ruff_cache/
 .pytest_cache/
 dump.rdb
+
+# --- local model weights ---
+# Downloaded on demand by ops/scripts/make_speech_fixture.sh (piper) and by faster-whisper.
+# Large binaries; never committed. Re-created by the scripts, not checked in.
+models/tts/*.onnx
+models/tts/*.onnx.json
+models/whisper/

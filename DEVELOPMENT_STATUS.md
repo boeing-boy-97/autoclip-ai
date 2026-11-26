@@ -1,14 +1,16 @@
 # DEVELOPMENT STATUS
 
 **Product:** AutoClipper AI — autonomous video intelligence, clipping & YouTube publishing
-**Current phase:** Phase 1 — Authentication, projects and source ingestion — **COMPLETE**
-**Previous phase:** Phase 0 — Architecture and project foundation — **COMPLETE**
+**Current phase:** Phase 2 — Transcription and analysis pipeline — **COMPLETE**
+**Previous phases:** Phase 1 — Auth, projects, source ingestion — **COMPLETE** ·
+Phase 0 — Architecture and project foundation — **COMPLETE**
 **Date:** 2026-11-26
 **Verification commands:**
 `./ops/scripts/phase0_verify.sh` → **20 checks passed, 0 failed**
 `./ops/scripts/verify_migrations.sh` → **NO DRIFT (1039 = 1039 DDL lines)**
-`pytest` → **130 passed** (72 unit + 58 integration, real PostgreSQL/Redis/FFmpeg)
+`pytest` → **182 passed** (82 unit + 100 integration, real PostgreSQL/Redis/FFmpeg/Whisper)
 `ruff check .` → **All checks passed**
+`python3 ops/scripts/validate_openapi.py` → **62 operations / 53 paths / 43 schemas — passed**
 
 ---
 
@@ -232,6 +234,163 @@ another, compare normalised DDL (**1039 vs 1039 lines, no drift**), then `downgr
 
 ---
 
+---
+
+## 4B. Phase 2 — Transcription and analysis pipeline (COMPLETE)
+
+### What was built
+
+**Pipeline services** (`backend/app/services/`)
+- `transcription.py` — real ASR behind a provider interface. `faster-whisper` on CPU with
+  `tiny.en` int8 for local verification; the model dir, device, compute type and provider are all
+  configuration, never hardcoded. Returns segments with word timings only where the model actually
+  produced them — no interpolated or invented timestamps. Provider unavailability and provider
+  failure are distinct exception types because they map to different HTTP outcomes (503 vs 422).
+- `scoring.py` — ten content criteria plus four roll-ups loaded from `config/scoring.yaml`
+  (`version 2026-01-v1`, weights validated to sum to 1.0). `overall` is computed as the weighted
+  sum and recomputed in tests from the stored component scores, so the number is always traceable
+  to its inputs. Scoring is labelled `method=heuristic` and carries an explicit
+  "not a view prediction" disclaimer in the API response.
+- `visual.py` — scene detection and frame metrics via FFmpeg alone (no OpenCV dependency added):
+  brightness, contrast, sharpness, flat-frame ratio and a visual-quality score. Scene boundaries
+  are verified against a fixture with cuts at exactly 10000 ms and 12000 ms.
+- `analysis.py` — orchestrates audio extraction → transcription → visual analysis → semantic
+  analysis → moment detection, persisting `media_assets`, `transcripts`,
+  `transcript_segments`, `speakers`, `video_analysis`, `scenes`, `candidate_moments`,
+  `candidate_scores` and a `processing_jobs` row per stage.
+
+**API** — four new routes (20 paths total):
+`POST /projects/{id}/analyze`, `GET /projects/{id}/analysis`, `GET /projects/{id}/transcript`
+(`?include_words`), `GET /projects/{id}/moments` (`?limit&offset&selected_only&category`).
+
+**Fixtures** — `ops/scripts/make_speech_fixture.sh` generates a 19.8 s clip with real speech
+(piper TTS muxed with a `testsrc2` video track). The earlier tone fixtures contain no speech at
+all, so they can only ever prove the honest-failure path; the speech fixture is what makes a
+successful transcription testable.
+
+**Spec export** — `python -m app.scripts.export_openapi` exports the *implemented* surface to
+`docs/openapi-implemented.json`. See "Two contract files" below for why this is a separate file
+from `docs/openapi.json`.
+
+### Live end-to-end evidence
+
+Fresh database, fresh storage root, real FFmpeg, real Whisper, real PostgreSQL:
+
+```
+1. upload: 201
+2. analyze: 202
+   status=MOMENT_DETECTION provider=faster-whisper model=tiny.en lang=en
+   segments=5 words=65 candidates=5 selected=1 weights=2026-01-v1
+3. transcript:
+   5 segments, confidence 0.973, 65 words
+   first: Most people think learning to code is about memorizing syntax.
+   last : Start with one small project you actually care about and finish it.
+4. top ranked moments:
+   total=5 selected=1
+   [ 7880-19680] other            overall= 66.0 (content 64 / tech 69 / context 78) sel=True
+   [    0-11760] surprising_fact  overall= 63.2 (content 56 / tech 69 / context 84) sel=False
+   [11980-19680] other            overall= 59.8 (content 59 / tech 69 / context 75) sel=False
+5. cross-tenant isolation:
+   transcript of foreign project: 404
+   moments of foreign project:    404
+```
+
+The transcript text is genuinely what the model heard, not a canned string — the fixture script is
+five sentences of natural speech and Whisper returned them with 0.973 confidence. The stage
+journal is exact and ordered:
+`CREATED → SOURCE_VALIDATION → INGESTING → MEDIA_INSPECTION → AUDIO_EXTRACTION → TRANSCRIPTION →
+VISUAL_ANALYSIS → SEMANTIC_ANALYSIS → MOMENT_DETECTION`.
+
+### Documented failure contract — all proven by tests, not asserted in prose
+
+| Situation | Response | Side effects |
+|---|---|---|
+| Source has no speech | `422 no_speech_detected` | `transcripts` stays 0, job `FAILED` with `error_code=no_speech_detected`; project stays `MEDIA_INSPECTION` |
+| Project has no source | `409 source_not_ready` | none |
+| Transcript requested before analysis | `404 transcript_not_found` ("POST /analyze first") | none |
+| Moments requested before analysis | `200` with `total=0` | none |
+| Another user's project | `404` (not 403 — no existence leak) | none |
+| Mutating request with bad CSRF | `403` | none |
+| Anonymous request | `401` | none |
+
+### Idempotency and re-run semantics
+
+- Plain repeat `POST /analyze` reuses the existing transcript: no new transcript row, no new job.
+  This is visible in the response, not just internal.
+- `force=true` re-transcribes and *replaces* prior work — transcript, segments, speakers, scenes
+  and `video_analysis` are deleted before reinsertion, in child-before-parent order.
+- Re-running a completed analysis reports the existing work rather than failing a valid state.
+  The stage graph is progress-only and acyclic, so `_enter()` *skips* stages already passed
+  instead of attempting an illegal backward transition, and terminal stages are guarded.
+
+### Bugs found by verification in this phase
+
+Sixteen defects were found and fixed, most of which would have shipped silently:
+
+1. Response shaping mutated ORM rows — `seg.words = None` in the GET handler was autoflushed and
+   permanently erased stored word timings. Fixed by deciding at the schema boundary.
+2. `force` was accepted in the query string and then ignored (returned 202 while doing an
+   idempotent reuse). Flags must change behaviour or be rejected.
+3. A forced re-run hit three `UNIQUE` violations in sequence — transcripts, speakers,
+   `video_analysis` — because the replace path was written before checking the schema's
+   constraints.
+4. The job row was rolled back together with the failure it was supposed to record, because the
+   failure path begins with `rollback()`.
+5. `_enter()` walked the stage graph backwards on a re-run.
+6. FFmpeg's `showinfo` log lines were invisible under `-v error`, so scene detection silently
+   found nothing.
+7. The ASR provider needed a path-decode workaround for the `av`/faster-whisper boundary;
+   downgrading `av` was the wrong fix and was rejected.
+8. Nine further lint/typing/consistency defects, including a public exception rename that broke
+   92 tests through a single stale import site.
+
+### Deliberate design decisions
+
+- **Synchronous `/analyze`.** It returns 202 but does the work in-request. The docstring says so
+  plainly: pretending to queue work that no worker will pick up would be a lie. The response shape
+  is already the one the queued version will return, so switching to Celery will not change the
+  contract.
+- **Heuristic scoring is labelled as such**, with a disclaimer in the response body.
+- **Honest 422 over a fabricated transcript.** A tone-only source is rejected
+  (`no_speech_detected`) rather than given a plausible-looking transcript.
+- **Two contract files.** `docs/openapi.json` is the Phase 0 *designed* product contract (62
+  operations, all planned endpoints) and is enforced by `validate_openapi.py`. Overwriting it with
+  today's 20 implemented paths would have deleted the roadmap and broken the validator — so the
+  implemented surface exports separately to `docs/openapi-implemented.json`, kept honest by a test
+  that fails if the committed file drifts from what the app serves. Diffing the two shows the
+  remaining work.
+
+### New environment variables
+
+`ASR_PROVIDER`, `ASR_MODEL`, `ASR_DEVICE`, `ASR_COMPUTE_TYPE`, `ASR_MODEL_DIR`, `SCORING_CONFIG_PATH`,
+`FFMPEG_BIN`, plus audio loudness targets. All documented in `.env.example`; all defaulted so the
+app starts without them.
+
+### Phase 2 exit criteria — status vs. the plan in §6
+
+| Planned | Status |
+|---|---|
+| Audio extraction (16 kHz mono WAV) + loudness normalisation as `media_assets` | **Done** |
+| Real ASR adapter persisting transcripts/segments/speakers with word timings | **Done** (word timings only where the model supplies them) |
+| Candidate moments + component scores from `config/scoring.yaml`, explainable | **Done** — 10 criteria + 4 roll-ups, `overall` recomputed in tests |
+| Scores presented as estimated content characteristics, never view predictions | **Done** — labelled `method=heuristic` with disclaimer |
+| Ranked candidate list retrievable via API with scores traceable to transcript | **Done** |
+| Tests: scoring determinism, idempotency, honest failures | **Done** — 182 passing |
+| Celery worker + beat, retries with exponential backoff, resume after a killed worker | **Deferred** — the `processing_jobs` table, stage journal and statuses are in place; `/analyze` runs in-request and says so. Resumability is not claimed because it is not implemented. |
+| Frontend: dashboard, create-project, upload progress, transcript viewer | **Deferred** — no frontend in this repo yet |
+
+### Outstanding limitations (stated, not hidden)
+
+1. **No Celery worker yet.** `POST /analyze` is synchronous. A long video will hold the request
+   open for the duration of transcription. This is a real limitation, not a design nicety.
+2. **`tiny.en` is a verification model, not a production model.** `large-v3` is not viable on
+   this 2 vCPU / 1.9 GB host. Accuracy on real-world audio has not been measured here.
+3. **Only English.** `language` is reported from the model, but no multilingual validation was done.
+4. **`GET /jobs*` and `POST /jobs/{id}/cancel|retry` remain unimplemented** — they are in the
+   designed contract (§`docs/openapi.json`) but not in the app.
+5. **Heuristic scoring has not been validated against real viewership data.** It is a transparent,
+   explainable starting point, deliberately not dressed up as a predictor.
+
 ## 5. Outstanding limitations (stated, not hidden)
 
 ### Expected at this phase
@@ -267,7 +426,7 @@ another, compare normalised DDL (**1039 vs 1039 lines, no drift**), then `downgr
 
 ---
 
-## 6. Next phase — Phase 2: Transcription and analysis pipeline
+## 6. The Phase 2 plan as written before the work (historical)
 
 **Build:**
 1. Celery worker + beat with Redis broker; `processing_jobs` rows created per stage, retries with
@@ -286,3 +445,29 @@ another, compare normalised DDL (**1039 vs 1039 lines, no drift**), then `downgr
 list is retrievable through the API with per-component scores traceable to the transcript; killing
 the worker mid-stage resumes from the correct stage; no fabricated segment timings or scores
 anywhere in the output.
+
+---
+
+## 7. Next phase — Phase 3: Rendering, the worker, and the frontend
+
+**Build, in dependency order:**
+1. **Celery worker + beat.** Redis broker is already configured and `processing_jobs` already
+   records stage, attempts, retryability and `celery_task_id`. Convert `/analyze` to enqueue and
+   return immediately with its existing response shape. Add exponential backoff and prove resume
+   after a SIGKILL mid-stage — resumability is currently *not* claimed and must not be claimed
+   until it is tested.
+2. **`GET /jobs*`, `POST /jobs/{id}/cancel|retry`** — the only designed endpoints still missing.
+3. **Clip rendering.** Cut, reframe to 9:16, burn captions from the stored word timings, persist
+   `clips` + `clip_versions`. Captions must come from real timings; where the ASR gave none,
+   the clip must not pretend it has them.
+4. **Quality check** — reuse the Phase 2 visual metrics as the objective half of the QC report.
+5. **YouTube OAuth and publish** — needs real credentials; until then the honest
+   `youtube_not_configured` path stays.
+6. **Frontend** — dashboard, create-project, upload with progress, transcript viewer, moment list
+   with per-component scores visible.
+7. **A production ASR model and a real accuracy measurement.** `tiny.en` proved the pipeline, not
+   the product; word error rate on actual source material is unmeasured.
+
+**Exit criteria:** a user can upload a video, watch progress update asynchronously, review a
+ranked moment list with explainable scores, and receive a rendered 9:16 clip with correctly timed
+captions — with every number traceable to real measured data and no fabricated output anywhere.

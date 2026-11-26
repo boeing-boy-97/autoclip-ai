@@ -29,6 +29,8 @@ ignore = [
 "backend/app/services/storage.py" = ["ARG002"]
   #  - ARG002: the Storage interface's parameters must match across backends, even where the
   #            local implementation cannot honour them (it raises instead of faking a URL)
+"backend/app/scripts/**" = ["T20"]
+  #  - T20: these are operator CLI entry points; printing to stdout is the deliverable
 "ops/scripts/**" = ["T20", "S", "ANN", "E501"]
   #  - E501: these scripts embed long SQL fragments and OpenAPI descriptions verbatim
 
