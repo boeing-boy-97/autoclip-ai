@@ -8,11 +8,14 @@ select = ["E", "F", "W", "I", "N", "UP", "B", "S", "A", "C4", "DTZ", "T20", "PT"
 ignore = [
   "ANN101", "ANN102",  # self/cls annotations
   "ANN401",            # Any is appropriate at provider boundaries
-  "PLR0913",           # FastAPI handlers legitimately take many parameters
+  "PLR0913", "PLR0917",  # FastAPI handlers legitimately take many parameters
   "PLR0915", "PLR0912",# long setup functions (app factory, health probes)
   "B008",              # FastAPI's Depends()/Body() in defaults is the documented pattern
   "S101",              # asserts are used for internal invariants, not user input
   "TCH003",            # typing-only imports resolved at runtime by pydantic
+  "TC001", "TC002", "TC003",  # same rule, current code names: SQLAlchemy/Pydantic models and
+                              # Settings are needed at runtime to resolve annotations and are
+                              # referenced by FastAPI dependency signatures
   "PLR2004",           # magic values are named in comments where relevant
   "RUF001", "RUF002",  # en-dashes in prose/docstrings are intentional
 ]
@@ -20,8 +23,18 @@ ignore = [
 [lint.per-file-ignores]
 "backend/tests/**" = ["S", "ANN", "PLR2004", "ARG", "T20",
                        "PLC0415"]  # in-function imports keep env setup ordered before app import
-"backend/app/main.py" = ["ANN001"]  # dependency-probe helper takes Settings
-"ops/scripts/**" = ["T20", "S", "ANN"]
+"backend/app/main.py" = ["ANN001", "PLC0415"]
+  #  - ANN001: dependency-probe helper takes Settings
+  #  - PLC0415: routers are imported inside the factory so settings are read first
+"backend/app/services/storage.py" = ["ARG002"]
+  #  - ARG002: the Storage interface's parameters must match across backends, even where the
+  #            local implementation cannot honour them (it raises instead of faking a URL)
+"ops/scripts/**" = ["T20", "S", "ANN", "E501"]
+  #  - E501: these scripts embed long SQL fragments and OpenAPI descriptions verbatim
+
+# The baseline migration embeds the reviewed DDL verbatim; reformatting it would obscure the
+# one-to-one correspondence with docs/database/schema.sql that the drift check depends on.
+"backend/app/db/migrations/versions/0001_baseline.py" = ["E501"]
 
 [lint.isort]
 known-first-party = ["app"]

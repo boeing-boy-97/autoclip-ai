@@ -51,3 +51,4 @@ celerybeat-schedule*
 *.swp
 .ruff_cache/
 .pytest_cache/
+dump.rdb

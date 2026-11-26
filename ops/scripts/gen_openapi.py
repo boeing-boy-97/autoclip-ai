@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import json
 import pathlib
+import re as _re
 
 OUT = pathlib.Path(__file__).resolve().parents[2] / "docs" / "openapi.json"
 
@@ -719,8 +720,6 @@ for name, item in [
 PATHS: dict = {}
 
 
-import re as _re
-
 _PATH_PARAM_TYPES = {
     "project_id": "uuid", "clip_id": "uuid", "source_id": "uuid", "job_id": "uuid",
     "channel_id": "uuid", "version_id": "uuid", "notification_id": "uuid",
@@ -768,7 +767,7 @@ add("/api/v1/projects", "post", op(
     desc="Creates a project in SOURCE_VALIDATION. A YouTube source requires a rights declaration; "
          "if no authorized media source exists the response explains the situation and offers upload."))
 add("/api/v1/projects", "get", op(
-    "List Projects", tag="Projects", query=PAGE_PARAMS + [
+    "List Projects", tag="Projects", query=[*PAGE_PARAMS,
         {"name": "status", "in": "query", "schema": {"type": "string"}},
         {"name": "q", "in": "query", "schema": {"type": "string"}},
         {"name": "channel_id", "in": "query", "schema": {"type": "string", "format": "uuid"}},
@@ -845,7 +844,7 @@ add("/api/v1/projects/{project_id}/transcript", "get", op(
     "Get Transcript", tag="Analysis", response=(200, "Transcript"),
     query=[{"name": "include_words", "in": "query", "schema": {"type": "boolean", "default": True}}]))
 add("/api/v1/projects/{project_id}/moments", "get", op(
-    "List Moments", tag="Analysis", query=PAGE_PARAMS + [
+    "List Moments", tag="Analysis", query=[*PAGE_PARAMS,
         {"name": "selected_only", "in": "query", "schema": {"type": "boolean", "default": False}},
         {"name": "category", "in": "query", "schema": {"type": "string"}},
     ], response=(200, "MomentPage")))
@@ -861,7 +860,7 @@ add("/api/v1/projects/{project_id}/generate-clips", "post", op(
         },
     }), errors=(400, 401, 403, 404, 409, 402)))
 add("/api/v1/projects/{project_id}/clips", "get", op(
-    "List Project Clips", tag="Clips", query=PAGE_PARAMS + [
+    "List Project Clips", tag="Clips", query=[*PAGE_PARAMS,
         {"name": "state", "in": "query", "schema": {"type": "string"}},
         {"name": "publishable", "in": "query", "schema": {"type": "boolean"}},
         {"name": "sort", "in": "query", "schema": {"type": "string", "enum": ["created_at", "overall", "duration_ms"]}},
@@ -987,7 +986,7 @@ add("/api/v1/clips/{clip_id}/schedule", "post", op(
     desc="Persistent scheduler (DB + Beat tick), not an in-memory timer. Stored in UTC; "
          "requires private privacy + publishAt per API semantics."))
 add("/api/v1/publishing/history", "get", op(
-    "Get Publishing History", tag="Publishing", query=PAGE_PARAMS + [
+    "Get Publishing History", tag="Publishing", query=[*PAGE_PARAMS,
         {"name": "channel_id", "in": "query", "schema": {"type": "string", "format": "uuid"}},
         {"name": "state", "in": "query", "schema": {"type": "string"}},
         {"name": "from", "in": "query", "schema": {"type": "string", "format": "date"}},
@@ -1044,7 +1043,7 @@ add("/api/v1/jobs/{job_id}/retry", "post", op(
 add("/api/v1/jobs/{job_id}/cancel", "post", op(
     "Cancel Job", tag="Jobs", response=(200, "Job"), errors=(401, 403, 404, 409)))
 add("/api/v1/jobs", "get", op(
-    "List Jobs", tag="Jobs", query=PAGE_PARAMS + [
+    "List Jobs", tag="Jobs", query=[*PAGE_PARAMS,
         {"name": "status", "in": "query", "schema": {"type": "string"}},
         {"name": "queue", "in": "query", "schema": {"type": "string"}},
         {"name": "project_id", "in": "query", "schema": {"type": "string", "format": "uuid"}},
@@ -1052,7 +1051,7 @@ add("/api/v1/jobs", "get", op(
 
 # ------------------------------------------------------------------ system extras
 add("/api/v1/notifications", "get", op(
-    "List Notifications", tag="Notifications", query=PAGE_PARAMS + [
+    "List Notifications", tag="Notifications", query=[*PAGE_PARAMS,
         {"name": "unread_only", "in": "query", "schema": {"type": "boolean", "default": False}},
     ], response=(200, "NotificationPage")))
 add("/api/v1/notifications/{notification_id}/read", "post", op(

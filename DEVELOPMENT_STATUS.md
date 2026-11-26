@@ -1,9 +1,14 @@
 # DEVELOPMENT STATUS
 
 **Product:** AutoClipper AI — autonomous video intelligence, clipping & YouTube publishing
-**Current phase:** Phase 0 — Architecture and project foundation — **COMPLETE**
+**Current phase:** Phase 1 — Authentication, projects and source ingestion — **COMPLETE**
+**Previous phase:** Phase 0 — Architecture and project foundation — **COMPLETE**
 **Date:** 2026-11-26
-**Verification command:** `./ops/scripts/phase0_verify.sh` → **20 checks passed, 0 failed**
+**Verification commands:**
+`./ops/scripts/phase0_verify.sh` → **20 checks passed, 0 failed**
+`./ops/scripts/verify_migrations.sh` → **NO DRIFT (1039 = 1039 DDL lines)**
+`pytest` → **130 passed** (72 unit + 58 integration, real PostgreSQL/Redis/FFmpeg)
+`ruff check .` → **All checks passed**
 
 ---
 
@@ -139,14 +144,105 @@ autoclip-ai/
 
 ---
 
+---
+
+## 4A. Phase 1 — Authentication, projects and source ingestion (COMPLETE)
+
+### What was built
+
+| Area | Delivered | Files |
+|---|---|---|
+| Security primitives | Argon2id (t=3/m=64 MiB/p=4) + HMAC-SHA256 pepper, opaque 256-bit session tokens (SHA-256 stored), CSRF double-submit digests, AES-256-GCM `SecretBox`, login throttling in Redis | `app/core/security.py` |
+| State machine | 24-stage declarative graph, `assert_transition`, `resume_stage`, `progress_percent`; `FAILED`/`CANCELLED` absorbing | `app/core/stage_graph.py` |
+| Persistence | All 33 domain tables mapped; engine/session factories; **one transaction per request** committed by the dependency | `app/db/session.py`, `app/db/models/__init__.py` |
+| Migrations | `0001_baseline` reproduces `schema.sql` exactly (drift-checked, downgrade round-trip) | `app/db/migrations/` |
+| Data access | Every repository call requires `workspace_id`; opt-in keyset pagination | `app/db/repositories.py` |
+| Auth API | `POST /auth/register`, `/auth/login`, `/auth/logout`, `GET /auth/me` | `app/api/v1/auth.py` |
+| Projects API | CRUD + `/stages` journal; soft delete; cursor pagination; settings-only PATCH | `app/api/v1/projects.py` |
+| Workspaces/system API | `GET /workspaces`, `/dashboard`, `/jobs`, `/jobs/{id}` | `app/api/v1/system.py` |
+| **Source ingestion** | Multipart upload → extension/MIME/magic-byte checks → streamed storage with size cap + SHA-256 → real `ffprobe` inspection → facts persisted → stage journal advanced | `app/api/v1/sources.py`, `app/services/ingest.py` |
+| Storage abstraction | Local filesystem (dev, refuses production) and S3-compatible; server-generated keys only; signed URLs; no media streamed by the API | `app/services/storage.py` |
+| Media validation | Container sniffing, FFmpeg probing with `-protocol_whitelist file` (SSRF guard), timeout, duration/resolution/audio/fps rules | `app/services/media_probe.py` |
+| Error contract | `problem+json` for `ApiError`, repository `NotFoundError`/`ConflictError`, framework `HTTPException`, validation errors; `Retry-After` preserved | `app/main.py` |
+| Tests | 130 passing: 72 unit, 58 integration against real PostgreSQL 17 + Redis + FFmpeg | `tests/unit/`, `tests/integration/` |
+
+### Live end-to-end evidence (uvicorn, real PostgreSQL, real FFmpeg)
+
+| Step | Observed |
+|---|---|
+| Register | `201` → user + workspace + `owner` membership + `csrf_token` |
+| Upload 30 s talking-head MP4 | `201`, `state=ready`, `duration_ms=30000`, `640x360`, `h264`/`aac`, `byte_size=1202759` — all matching `ffprobe` |
+| Stored object integrity | `stored size 1202759`; SHA-256 of stored object **identical** to the upload |
+| Stage journal | `None→CREATED`, `CREATED→SOURCE_VALIDATION`, `→INGESTING`, `→MEDIA_INSPECTION` |
+| Corrupt / renamed / audio-only file | `415 unsupported_media`, audited, project left `CREATED` and retryable |
+| Missing rights declaration | `422 source_not_authorized` |
+| Upload without CSRF | `403 forbidden` |
+| Second source on one project | `409 project_already_has_source` |
+| Non-member upload (foreign workspace) | `404 workspace_not_found` |
+| Non-member upload (own workspace, foreign project id) | `404 project_not_found` |
+| Unauthenticated upload | `401` |
+| Cross-tenant dashboard/job probe | `404`, and the response no longer echoes the requested id |
+
+### Bugs found by verification and fixed in this phase
+
+1. **Silent rollback:** `get_db` never committed, so an upload returned `201` while every write was discarded at session close. Fixed centrally: the dependency owns the transaction boundary.
+2. **File corruption on upload:** the magic-byte sniff consumed the first 4 KiB of the spool handle and the copy then streamed from the same position — stored files were missing their header. A test comparing stored bytes to the uploaded bytes caught it; the sniff now uses its own handle.
+3. **`ProjectOut.source` serialisation crash:** validating the ORM object embedded raw `sha256` bytes → `500` as soon as a project had a source. Now built through `SourceOut.from_model`.
+4. **Dependency errors escaped as `500`:** `NotFoundError` raised by the workspace dependency reached the generic handler. Added dedicated handlers → `404`/`409` with the documented codes.
+5. **Invalid `inet` cast:** `client.host` of `testclient` (or a proxy header) broke `audit_logs.ip`. Added `valid_ip()` validation at every write site.
+6. **Cursor corruption:** ISO-8601 cursors travelled through the query string, where `+00:00` became a space → `409 invalid_cursor` on page 2. Cursors are now URL-safe base64 of epoch microseconds.
+7. **`Retry-After` dropped:** the `ApiError` handler built a fresh response and lost headers, breaking 429 semantics.
+8. **Test-infrastructure flaws that hid real behaviour:** actors shared one cookie jar (so "cross-tenant" tests compared a user with itself), and fixture ordering let Redis flushes invalidate live sessions. Both fixed; isolation tests now use independent clients.
+9. **Phantom dedupe path:** a `find_by_checksum` branch was unreachable (a project holds one source, so the 409 always fires first) — removed rather than left as dead code.
+10. Mapped attribute named `bytes` shadowed the builtin and broke every later annotation, masked by a misleading `SADeprecationWarning` under pytest.
+
+### Deliberate design decisions
+
+* **Rejected uploads do not fail the project.** `FAILED` is absorbing, and one bad file must not force the user to recreate a project; the refusal is audited (`source.rejected`) and no source row is written, so the retry path stays open.
+* **A project holds exactly one source.** Enforced by the schema (unique index) and reported as `409`, rather than a soft "latest wins" rule.
+* **Progress is `null` where no honest denominator exists** — no invented percentages.
+* **Local storage cannot mint signed URLs**; it raises instead of returning a plausible-looking fake.
+
+### New environment variables
+
+None. Phase 1 uses settings already documented in `.env.example`
+(`MAX_UPLOAD_MB`, `STORAGE_BACKEND`, `LOCAL_STORAGE_ROOT`, `S3_*`, `FFPROBE_BIN`,
+`MAX_SOURCE_DURATION_MINUTES`).
+
+### Migration explanation
+
+`0001_baseline` embeds the reviewed DDL from `docs/database/schema.sql` and is verified by
+`ops/scripts/verify_migrations.sh`: apply `schema.sql` to a reference database, apply migrations to
+another, compare normalised DDL (**1039 vs 1039 lines, no drift**), then `downgrade base` →
+`upgrade head` to prove reversibility. Model changes in this phase (PG `Enum` declarations,
+`ARRAY(Integer)`, the `byte_size`→`bytes` mapping) are ORM-level only and produce no DDL change.
+
+### Phase 1 exit criteria — status
+
+| Criterion | Status |
+|---|---|
+| Registration → login → session works with real cookies/CSRF | ✅ |
+| Project created with legal initial stage and journal entry | ✅ |
+| Real fixture upload inspected by `ffprobe`, facts recorded | ✅ |
+| Corrupt / wrong-MIME / wrong-extension / audio-only rejected with specific codes | ✅ |
+| Workspace isolation: non-member reads/writes are 404, never data, never 403 | ✅ |
+| Dashboard numbers equal database counts | ✅ |
+| Migrations reproduce the schema and reverse cleanly | ✅ |
+| Frontend shell and auth UI | ❌ **Not started — see limitations** |
+
+---
+
 ## 5. Outstanding limitations (stated, not hidden)
 
 ### Expected at this phase
-1. **No domain code yet.** Auth, projects, uploads, analysis, clips, publishing are Phase 1+.
-   `docs/openapi.json` specifies them; the app currently serves only health + error contract.
-2. **Frontend is scaffolding only** (directory structure + Dockerfile). No pages.
-3. **Alembic migrations not yet authored.** `schema.sql` is authoritative; Phase 1 generates
-   revisions from it and adds a drift check.
+1. **No frontend yet.** The Next.js app is still scaffolding; the backend API is fully exercisable
+   via HTTP (see the live evidence in §4A) but there is no UI. This is the largest remaining gap.
+2. **Analysis, clip generation, rendering and publishing are not implemented.** They are specified
+   in `docs/openapi.json` and blocked out in `config/*.yaml`, and will be Phase 2+.
+3. **No background worker yet.** Ingest runs synchronously inside the request (media probing is
+   CPU-bound but bounded); Celery wiring, job records and retries arrive with Phase 2, which is
+   when the ~30 s probe should move off the request path.
+4. **Timeline thumbnails, waveform peaks and the full 9:16 render preview** do not exist yet.
 
 ### External dependencies that cannot be demonstrated here
 4. **YouTube publishing cannot be exercised** without operator-supplied OAuth client credentials
@@ -171,23 +267,22 @@ autoclip-ai/
 
 ---
 
-## 6. Next phase — Phase 1: Authentication and project management
+## 6. Next phase — Phase 2: Transcription and analysis pipeline
 
 **Build:**
-1. `core/security.py` (Argon2id, session tokens, CSRF), `db/session.py` (async SQLAlchemy + pool).
-2. SQLAlchemy models for users, workspaces, members, sessions, projects, source_videos, media_assets,
-   project_stage_events + first Alembic revision matching `schema.sql` exactly.
-3. `POST /auth/register|login|logout`, `GET /auth/me` with real session cookies.
-4. Workspace authorization dependency; repository layer with mandatory `workspace_id`.
-5. Projects CRUD + the declarative `STAGE_GRAPH` state machine (single source of truth, unit-tested).
-6. Upload path: streaming size cap, magic-byte + MIME + extension + `ffprobe` validation, SHA-256,
-   storage abstraction (local + S3), signed URLs.
-7. Dashboard summary endpoint backed by real counts, with useful empty states.
-8. Frontend: app shell, auth pages, dashboard, create-project flow, project list/detail.
-9. Integration tests: migrations up/down, workspace isolation matrix, upload rejection cases.
+1. Celery worker + beat with Redis broker; `processing_jobs` rows created per stage, retries with
+   exponential backoff, `job_id` on every stage transition, idempotent re-entry.
+2. Audio extraction (16 kHz mono WAV) and FFmpeg loudness normalisation, stored as `media_assets`.
+3. ASR adapter: real provider when `ASR_PROVIDER` credentials exist, otherwise the labelled
+   `heuristic_fallback` path. Persist `transcripts`, `transcript_segments`, `speakers` with
+   word-level timings where the provider supplies them.
+4. Candidate-moment detection from transcript structure, `candidate_moments`/`candidate_scores`
+   using `config/scoring.yaml`, with component scores stored and explainable.
+5. Virality scores presented as **estimated content characteristics**, never as view predictions.
+6. Frontend: dashboard, create-project flow, upload with progress, transcript viewer.
+7. Tests: worker idempotency, resumability after a killed worker, scoring determinism.
 
-**Exit criteria (must be demonstrated, not asserted):**
-registration → login → create project → upload a fixture → real `ffprobe` inspection recorded →
-source state `ready` → project in `INGESTING`/`MEDIA_INSPECTION` with a correct `project_stage_events`
-journal; corrupt/wrong-MIME uploads rejected with specific codes; a second workspace cannot read any
-of it (404); dashboard numbers equal the database.
+**Exit criteria:** an uploaded fixture is transcribed, segmented, scored, and a ranked candidate
+list is retrievable through the API with per-component scores traceable to the transcript; killing
+the worker mid-stage resumes from the correct stage; no fabricated segment timings or scores
+anywhere in the output.

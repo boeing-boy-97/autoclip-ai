@@ -181,6 +181,67 @@ def create_app() -> FastAPI:
             trace_id=getattr(request.state, "trace_id", None) or request.headers.get("X-Trace-Id"),
         )
 
+    # ------------------------------------------------------------ API v1 routers
+    from app.api.deps import ApiError
+
+    # Routers are imported inside the factory so environment-dependent settings are read
+    # first; noqa: PLC0415 is deliberate for the whole block.
+    from app.api.v1.auth import router as auth_router
+    from app.api.v1.projects import router as projects_router
+    from app.api.v1.sources import router as sources_router
+    from app.api.v1.system import router as system_router
+
+    @app.exception_handler(ApiError)
+    async def _api_error_handler(request: Request, exc: ApiError) -> JSONResponse:
+        """Domain errors carry a stable `code`; the UI switches on it, not on prose."""
+        response = problem(
+            status_code=exc.status_code,
+            code=exc.code,
+            title=exc.title,
+            detail=exc.detail,
+            trace_id=getattr(request.state, "trace_id", None),
+        )
+        # Headers such as Retry-After are part of the contract (429 semantics).
+        for name, value in exc.headers.items():
+            response.headers[name] = value
+        return response
+
+    # ------------------------------------------------------------ repository errors
+    # Repository errors are domain errors. Handlers translate them, but a dependency (for
+    # example workspace membership resolution) can raise before the handler ever runs. Without
+    # these handlers such a request became a 500 instead of the documented 404/409 — precisely
+    # the path an attacker hits when probing another tenant's workspace ids.
+    from app.db.repositories import ConflictError as _RepoConflict
+    from app.db.repositories import NotFoundError as _RepoNotFound
+
+    @app.exception_handler(_RepoNotFound)
+    async def _repo_not_found_handler(request: Request, exc: _RepoNotFound) -> JSONResponse:
+        code = f"{getattr(exc, 'resource', 'resource')}_not_found"
+        return problem(
+            status_code=status.HTTP_404_NOT_FOUND,
+            code=code,
+            title="Not found",
+            # No identifier in the message: echoing it back would confirm whether a guessed id
+            # exists in another tenant's workspace.
+            detail=f"{getattr(exc, 'resource', 'resource')} not found",
+            trace_id=getattr(request.state, "trace_id", None),
+        )
+
+    @app.exception_handler(_RepoConflict)
+    async def _repo_conflict_handler(request: Request, exc: _RepoConflict) -> JSONResponse:
+        return problem(
+            status_code=status.HTTP_409_CONFLICT,
+            code=getattr(exc, "code", None) or "conflict",
+            title="Conflict",
+            detail=str(exc),
+            trace_id=getattr(request.state, "trace_id", None),
+        )
+
+    app.include_router(auth_router, prefix=s.api_prefix)
+    app.include_router(system_router, prefix=s.api_prefix)
+    app.include_router(projects_router, prefix=s.api_prefix)
+    app.include_router(sources_router, prefix=s.api_prefix)
+
     # ------------------------------------------------------------ health
     @app.get("/api/v1/health/livez", tags=["System"], summary="Liveness probe")
     async def livez() -> dict[str, str]:
