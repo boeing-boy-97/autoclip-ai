@@ -29,6 +29,9 @@ MINIMAL = {
     "password_pepper": "a-real-pepper-value-1234",
     "database_url": "postgresql+psycopg://u:p@localhost:5432/db",
     "redis_url": "redis://localhost:6379/0",
+    # Pinned so a `CELERY_TASK_ALWAYS_EAGER` in the ambient environment (conftest sets it true so
+    # the suite runs without a broker) cannot leak into a production-settings test.
+    "celery_task_always_eager": False,
 }
 
 

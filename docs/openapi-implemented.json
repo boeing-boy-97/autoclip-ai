@@ -59,6 +59,18 @@
             "title": "Has Transcript",
             "type": "boolean"
           },
+          "job_id": {
+            "anyOf": [
+              {
+                "format": "uuid",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Job Id"
+          },
           "language": {
             "anyOf": [
               {
@@ -107,6 +119,11 @@
               }
             ],
             "title": "Provider"
+          },
+          "queued": {
+            "default": false,
+            "title": "Queued",
+            "type": "boolean"
           },
           "segment_count": {
             "default": 0,
@@ -392,6 +409,18 @@
             ],
             "title": "Error Detail"
           },
+          "finished_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Finished At"
+          },
           "id": {
             "format": "uuid",
             "title": "Id",
@@ -401,6 +430,18 @@
             "default": 3,
             "title": "Max Attempts",
             "type": "integer"
+          },
+          "next_retry_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Next Retry At"
           },
           "progress": {
             "anyOf": [
@@ -412,6 +453,17 @@
               }
             ],
             "title": "Progress"
+          },
+          "progress_note": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Progress Note"
           },
           "project_id": {
             "anyOf": [
@@ -433,6 +485,18 @@
             "title": "Stage",
             "type": "string"
           },
+          "started_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Started At"
+          },
           "status": {
             "title": "Status",
             "type": "string"
@@ -450,6 +514,33 @@
           "status"
         ],
         "title": "JobOut",
+        "type": "object"
+      },
+      "JobPage": {
+        "properties": {
+          "items": {
+            "items": {
+              "$ref": "#/components/schemas/JobOut"
+            },
+            "title": "Items",
+            "type": "array"
+          },
+          "next_cursor": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Next Cursor"
+          }
+        },
+        "required": [
+          "items"
+        ],
+        "title": "JobPage",
         "type": "object"
       },
       "LoginRequest": {
@@ -2229,6 +2320,7 @@
     },
     "/api/v1/workspaces/{workspace_id}/jobs": {
       "get": {
+        "description": "Newest-first background jobs, filterable by status, stage and project.",
         "operationId": "list_jobs_api_v1_workspaces__workspace_id__jobs_get",
         "parameters": [
           {
@@ -2259,14 +2351,63 @@
           },
           {
             "in": "query",
+            "name": "stage",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Stage"
+            }
+          },
+          {
+            "in": "query",
+            "name": "project_id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "format": "uuid",
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Project Id"
+            }
+          },
+          {
+            "in": "query",
             "name": "limit",
             "required": false,
             "schema": {
-              "default": 50,
+              "default": 20,
               "maximum": 100,
               "minimum": 1,
               "title": "Limit",
               "type": "integer"
+            }
+          },
+          {
+            "in": "query",
+            "name": "cursor",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Cursor"
             }
           },
           {
@@ -2307,11 +2448,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "items": {
-                    "$ref": "#/components/schemas/JobOut"
-                  },
-                  "title": "Response List Jobs Api V1 Workspaces  Workspace Id  Jobs Get",
-                  "type": "array"
+                  "$ref": "#/components/schemas/JobPage"
                 }
               }
             },
@@ -2330,7 +2467,6 @@
         },
         "summary": "List Jobs",
         "tags": [
-          "Dashboard",
           "Jobs"
         ]
       }
@@ -2341,21 +2477,21 @@
         "parameters": [
           {
             "in": "path",
-            "name": "job_id",
-            "required": true,
-            "schema": {
-              "format": "uuid",
-              "title": "Job Id",
-              "type": "string"
-            }
-          },
-          {
-            "in": "path",
             "name": "workspace_id",
             "required": true,
             "schema": {
               "format": "uuid",
               "title": "Workspace Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "job_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Job Id",
               "type": "string"
             }
           },
@@ -2416,7 +2552,210 @@
         },
         "summary": "Get Job",
         "tags": [
-          "Dashboard",
+          "Jobs"
+        ]
+      }
+    },
+    "/api/v1/workspaces/{workspace_id}/jobs/{job_id}/cancel": {
+      "post": {
+        "description": "Mark an unfinished job cancelled.\n\nThis stops the *record* from being picked up or retried. It cannot interrupt a task already\nexecuting inside a worker process \u2014 a CPU-bound FFmpeg or ASR call is not preemptible from\nhere, and pretending otherwise would be a lie. A running task that finishes will overwrite\nthis status on its own exit path.",
+        "operationId": "cancel_job_api_v1_workspaces__workspace_id__jobs__job_id__cancel_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "workspace_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Workspace Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "job_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Job Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "x-csrf-token",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Csrf-Token"
+            }
+          },
+          {
+            "in": "header",
+            "name": "authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          },
+          {
+            "in": "cookie",
+            "name": "ac_session",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Ac Session"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JobOut"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Cancel Job",
+        "tags": [
+          "Jobs"
+        ]
+      }
+    },
+    "/api/v1/workspaces/{workspace_id}/jobs/{job_id}/retry": {
+      "post": {
+        "description": "Re-queue a failed, dead-letter or cancelled job.",
+        "operationId": "retry_job_api_v1_workspaces__workspace_id__jobs__job_id__retry_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "workspace_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Workspace Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "job_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Job Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "x-csrf-token",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Csrf-Token"
+            }
+          },
+          {
+            "in": "header",
+            "name": "authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          },
+          {
+            "in": "cookie",
+            "name": "ac_session",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Ac Session"
+            }
+          }
+        ],
+        "responses": {
+          "202": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JobOut"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Retry Job",
+        "tags": [
           "Jobs"
         ]
       }
@@ -3032,7 +3371,7 @@
     },
     "/api/v1/workspaces/{workspace_id}/projects/{project_id}/analyze": {
       "post": {
-        "description": "Run audio extraction \u2192 transcription \u2192 candidate detection \u2192 scoring.\n\nRuns synchronously today: the ASR engine is CPU-bound but bounded, and pretending to queue\nwork that no worker will pick up would be a lie. When Celery workers land, this endpoint will\nenqueue and return immediately with the same response shape.",
+        "description": "Queue audio extraction \u2192 transcription \u2192 candidate detection \u2192 scoring.\n\nThe work runs in a Celery worker, not in this request. The response is the *current* analysis\nstatus: `status` reflects the project's stage, and `job_id` identifies the queued job so the\ncaller can poll `GET /jobs/{job_id}` for progress.\n\nIf an identical successful run already exists, nothing is queued and the existing result is\nreported immediately (`reused=true`) \u2014 polling a finished analysis should never be a way to\naccidentally pay for it twice.",
         "operationId": "analyse_project_api_v1_workspaces__workspace_id__projects__project_id__analyze_post",
         "parameters": [
           {

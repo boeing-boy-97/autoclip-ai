@@ -1,14 +1,14 @@
 # DEVELOPMENT STATUS
 
 **Product:** AutoClipper AI — autonomous video intelligence, clipping & YouTube publishing
-**Current phase:** Phase 2 — Transcription and analysis pipeline — **COMPLETE**
+**Current phase:** Phase 3 (partial) — Background worker, job control — **COMPLETE**
 **Previous phases:** Phase 1 — Auth, projects, source ingestion — **COMPLETE** ·
 Phase 0 — Architecture and project foundation — **COMPLETE**
 **Date:** 2026-11-26
 **Verification commands:**
 `./ops/scripts/phase0_verify.sh` → **20 checks passed, 0 failed**
 `./ops/scripts/verify_migrations.sh` → **NO DRIFT (1039 = 1039 DDL lines)**
-`pytest` → **182 passed** (82 unit + 100 integration, real PostgreSQL/Redis/FFmpeg/Whisper)
+`pytest` → **194 passed** (82 unit + 112 integration, real PostgreSQL/Redis/FFmpeg/Whisper)
 `ruff check .` → **All checks passed**
 `python3 ops/scripts/validate_openapi.py` → **62 operations / 53 paths / 43 schemas — passed**
 
@@ -391,6 +391,107 @@ app starts without them.
 5. **Heuristic scoring has not been validated against real viewership data.** It is a transparent,
    explainable starting point, deliberately not dressed up as a predictor.
 
+---
+
+## 4C. Phase 3 (partial) — Background worker and job control (COMPLETE)
+
+Phase 2 ended with a stated limitation: `POST /analyze` ran the whole pipeline inside the request,
+so a long video held a request thread for its duration. That is now fixed, and the endpoints that
+were missing from the designed contract exist.
+
+### What was built
+
+- `app/worker/` — Celery app with three queues split by cost profile (`media`, `transcribe`,
+  `analyze`), so a slow transcription cannot starve a cheap scoring job. `acks_late` and
+  `prefetch_multiplier=1` so a killed worker's message is redelivered rather than lost.
+- `app/worker/tasks.py` — `analysis.run` calls the **same** `AnalysisService` the synchronous path
+  used. There is one implementation of the pipeline, not two that drift. Tasks take ids, never
+  objects, and re-read state, so a retry sees current data.
+- `app/worker/dispatch.py` — the honest-fallback decision described below.
+- `analysis.sweep_stuck` — reclaims `RUNNING` jobs whose heartbeat went quiet because their worker
+  was killed. It moves them to `DEAD_LETTER` and does **not** silently retry.
+- `app/api/v1/jobs.py` — `GET /jobs`, `GET /jobs/{id}`, `POST /jobs/{id}/cancel`,
+  `POST /jobs/{id}/retry`. The previous list/get pair in `system.py` was removed rather than
+  duplicated (it was returning a bare array, which also violated the paginated-schema contract).
+- `AnalysisService.plan()` / `analyse()` split — validation and job reservation happen *before*
+  dispatch, so an illegal request fails with a precise 4xx instead of enqueueing work doomed to
+  fail minutes later.
+
+### Live evidence (real Redis, real Celery worker process, real PostgreSQL, real Whisper)
+
+```
+POST /analyze  ->  202 in 0.113 s          (was 3.69 s blocking, and O(video length) before)
+poll GET /jobs/{id}:  PENDING -> PENDING -> PENDING -> SUCCEEDED 100 "5 candidates"
+project:  status=MOMENT_DETECTION segments=5 words=65 candidates=5 selected=1
+journal:  ... SEMANTIC_ANALYSIS -> MOMENT_DETECTION [select_candidates]
+
+repeat /analyze (no force) -> queued=false, no new job row
+/analyze?force=true        -> queued=true,  new job, re-transcribes
+
+cancel a SUCCEEDED job -> 409 job_not_cancellable
+retry  a SUCCEEDED job -> 409 job_not_retryable  (re-running good work is ?force=true)
+no CSRF                -> 403
+other tenant's job     -> 404   (list and detail)
+anonymous              -> 401
+
+simulated killed worker (job RUNNING, heartbeat 2h old):
+  analysis.sweep_stuck -> {'reclaimed': [...], 'count': 1}
+  job became DEAD_LETTER / worker_lost
+```
+
+### The honest-fallback rule
+
+When the broker is unreachable there are exactly two acceptable behaviours, and which one applies
+depends on configuration:
+
+- `CELERY_TASK_ALWAYS_EAGER=true` — run in-process via `.apply()`. Same task body, same database
+  writes. Used by tests and local development.
+- otherwise — raise `BrokerUnavailableError`, and the API returns **503 `queue_unavailable`**. The
+  job row is already committed as `PENDING`, so the work is discoverable and retryable once the
+  broker returns.
+
+The third option — silently running the pipeline inside the web request — was rejected. It would
+make a misconfigured production deploy look healthy while blocking a request thread for minutes,
+which is the exact failure this change exists to remove.
+
+### Bugs found while building this (all fixed)
+
+1. **A job left dangling in `PENDING` forever.** When a retried job found an existing transcript it
+   returned early without closing the job. An adopted job must always reach a terminal state.
+2. **Retry did not redo the work.** `retry` dispatched without `force`, so the task reused the prior
+   transcript and returned in 0.07 s. A retry that changes nothing is a lie; it now forces a re-run.
+3. **The retry gate ran before the resume.** The `_REPEATABLE_STATUSES` check rejected a `FAILED`
+   project before `_resume()` could move it, because the resume block was placed after the gate.
+4. **`FAILED`/`CANCELLED` had no outgoing edge in the stage graph**, so a retry could re-run the
+   pipeline while the journal silently skipped every stage — leaving a project marked `FAILED` with
+   a fresh transcript underneath it. Added the single `-> MEDIA_INSPECTION` edge, reachable only by
+   an explicit retry, and documented why that does not contradict the "absorbing" invariant.
+5. **`AnalysisError` was not picklable**, so the worker log was full of
+   `UnpickleableExceptionWrapper(...)` instead of the real reason. It now reduces to JSON-safe
+   primitives.
+6. **`DEAD_LETTER` was unreachable.** `_fail_job` hardcoded `retryable=False`, so a transient
+   failure was always labelled permanent. Retryability is now threaded from the failure type.
+7. **`celery.exceptions.OperationalError` is a kombu error, not a `CeleryError`** — so a broker
+   outage escaped the handler and became a 500 instead of the intended 503. Caught by a test.
+8. **Eager mode swallowed task exceptions** (`task_eager_propagates` defaults to False), which
+   would have turned a `422 no_speech_detected` into a `202`. Eager mode now propagates.
+9. A test asserted on `Row.t`, which is a deprecated SQLAlchemy builtin attribute — it silently
+   returned the wrong value. Renamed the aliases.
+10. Duplicate operation IDs: a jobs list/get pair already existed in `system.py`.
+
+Also fixed a gate failure this surfaced: the new `job_stuck_after_seconds` setting was not
+documented in `.env.example`, which `phase0_verify.sh` checks.
+
+### Still true, and still not claimed
+
+- **Resumability after a killed worker is still not claimed as a feature.** The sweeper *detects*
+  and *surfaces* a lost worker (`DEAD_LETTER/worker_lost`) and a human or the retry endpoint can
+  restart it. The pipeline does not itself resume from a mid-stage checkpoint; a retry redoes the
+  analysis from the top. This distinction is deliberate — "resume" and "retry" are not synonyms.
+- **No Celery beat process for the sweeper yet.** `analysis.sweep_stuck` exists and works when
+  invoked, but nothing schedules it. Until beat is deployed, a lost worker needs a manual sweep.
+- The synchronisation section of the plan below is otherwise unchanged.
+
 ## 5. Outstanding limitations (stated, not hidden)
 
 ### Expected at this phase
@@ -451,12 +552,10 @@ anywhere in the output.
 ## 7. Next phase — Phase 3: Rendering, the worker, and the frontend
 
 **Build, in dependency order:**
-1. **Celery worker + beat.** Redis broker is already configured and `processing_jobs` already
-   records stage, attempts, retryability and `celery_task_id`. Convert `/analyze` to enqueue and
-   return immediately with its existing response shape. Add exponential backoff and prove resume
-   after a SIGKILL mid-stage — resumability is currently *not* claimed and must not be claimed
-   until it is tested.
-2. **`GET /jobs*`, `POST /jobs/{id}/cancel|retry`** — the only designed endpoints still missing.
+1. ~~Celery worker + beat, convert `/analyze` to enqueue, `GET /jobs*` and
+   `POST /jobs/{id}/cancel|retry`.~~ **Done — see §4C.** Remaining from this item: a beat schedule
+   for `analysis.sweep_stuck`, and genuine mid-stage checkpointing if true resumability is wanted
+   (today a retry restarts the analysis, it does not resume it).
 3. **Clip rendering.** Cut, reframe to 9:16, burn captions from the stored word timings, persist
    `clips` + `clip_versions`. Captions must come from real timings; where the ASR gave none,
    the clip must not pretend it has them.

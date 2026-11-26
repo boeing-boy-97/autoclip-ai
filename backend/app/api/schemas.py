@@ -236,7 +236,16 @@ class JobOut(ORMModel):
     max_attempts: int = 3
     error_code: str | None = None
     error_detail: str | None = None
+    progress_note: str | None = None
+    started_at: datetime | None = None
+    finished_at: datetime | None = None
+    next_retry_at: datetime | None = None
     created_at: datetime | None = None
+
+
+class JobPage(BaseModel):
+    items: list[JobOut]
+    next_cursor: str | None = None
 
 
 # --------------------------------------------------------------------------- dashboard
@@ -420,3 +429,7 @@ class AnalysisStatusOut(BaseModel):
     method: str | None = None
     asr_configured: bool = True
     asr_note: str | None = None
+    # Set by POST /analyze: which background job is doing the work, so the caller can poll
+    # GET /jobs/{job_id} rather than being told nothing and guessing.
+    job_id: uuid.UUID | None = None
+    queued: bool = False

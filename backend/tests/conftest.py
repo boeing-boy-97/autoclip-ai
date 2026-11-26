@@ -35,6 +35,10 @@ os.environ.update(
         "AI_PROVIDER": "none",
         "YOUTUBE_CLIENT_ID": "",
         "YOUTUBE_CLIENT_SECRET": "",
+        # No broker in CI. Eager mode runs the real task body in-process, so the pipeline,
+        # the database writes and the error contract are all still exercised. That a message
+        # reaches a *separate* worker process is verified manually, not claimed here.
+        "CELERY_TASK_ALWAYS_EAGER": "true",
     }
 )
 

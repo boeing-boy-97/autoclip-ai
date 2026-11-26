@@ -5,7 +5,7 @@ from __future__ import annotations
 import uuid
 from typing import Annotated
 
-from fastapi import APIRouter, Depends, Query
+from fastapi import APIRouter, Depends
 
 from app.api.deps import (
     ApiError,
@@ -16,10 +16,9 @@ from app.api.deps import (
     current_auth,
     workspace_access,
 )
-from app.api.schemas import DashboardSummary, JobOut, ProjectOut, WorkspaceOut
+from app.api.schemas import DashboardSummary, ProjectOut, WorkspaceOut
 from app.db.repositories import (
     DashboardRepository,
-    JobRepository,
     NotFoundError,
     WorkspaceRepository,
 )
@@ -82,33 +81,3 @@ def dashboard_summary(ctx: WorkspaceViewer, db: DbDep) -> DashboardSummary:
         recent_activity=data["recent_activity"],
         is_empty=data["is_empty"],
     )
-
-
-@router.get(
-    "/workspaces/{workspace_id}/jobs",
-    response_model=list[JobOut],
-    tags=["Jobs"],
-    summary="List Jobs",
-)
-def list_jobs(
-    ctx: WorkspaceViewer,
-    db: DbDep,
-    status_filter: Annotated[str | None, Query(alias="status")] = None,
-    limit: Annotated[int, Query(ge=1, le=100)] = 50,
-) -> list[JobOut]:
-    page = JobRepository(db).list(workspace_id=ctx.workspace.id, status=status_filter, limit=limit)
-    return [JobOut.model_validate(j) for j in page.items]
-
-
-@router.get(
-    "/workspaces/{workspace_id}/jobs/{job_id}",
-    response_model=JobOut,
-    tags=["Jobs"],
-    summary="Get Job",
-)
-def get_job(job_id: uuid.UUID, ctx: WorkspaceViewer, db: DbDep) -> JobOut:
-    try:
-        job = JobRepository(db).get(workspace_id=ctx.workspace.id, job_id=job_id)
-    except NotFoundError as exc:
-        raise ApiError("job_not_found", str(exc), status_code=404) from exc
-    return JobOut.model_validate(job)

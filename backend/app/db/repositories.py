@@ -449,6 +449,12 @@ class SourceRepository:
 # --------------------------------------------------------------------------- jobs
 
 
+# A job in one of these states has finished, one way or another.
+_TERMINAL_JOB_STATUSES = frozenset({"SUCCEEDED", "FAILED", "DEAD_LETTER", "CANCELLED"})
+# States from which a retry can legitimately restart the work.
+_RETRYABLE_JOB_STATUSES = frozenset({"FAILED", "DEAD_LETTER", "CANCELLED"})
+
+
 class JobRepository:
     QUEUE_FOR_STAGE: ClassVar[dict[str, str]] = {
         "source_validation": "media",
@@ -592,6 +598,75 @@ class JobRepository:
         job.error_code = code
         job.error_detail = detail[:2000]
         job.finished_at = datetime.now(UTC)
+        self.db.flush()
+        return job
+
+    def list_cursor(
+        self,
+        *,
+        workspace_id: uuid.UUID,
+        status: str | None = None,
+        stage: str | None = None,
+        project_id: uuid.UUID | None = None,
+        limit: int = 20,
+        cursor: str | None = None,
+    ) -> Page:
+        """Newest-first page of jobs, with a stable keyset cursor.
+
+        Ordered by `created_at DESC` using the same microsecond cursor as projects, so paging
+        never skips or repeats a row that lands between two requests.
+        """
+        stmt = select(ProcessingJob).where(ProcessingJob.workspace_id == workspace_id)
+        if status:
+            stmt = stmt.where(ProcessingJob.status == status)
+        if stage:
+            stmt = stmt.where(ProcessingJob.stage == stage)
+        if project_id:
+            stmt = stmt.where(ProcessingJob.project_id == project_id)
+        if cursor:
+            stmt = stmt.where(ProcessingJob.created_at < _decode_cursor(cursor))
+        rows = list(
+            self.db.scalars(stmt.order_by(ProcessingJob.created_at.desc()).limit(limit + 1))
+        )
+        next_cursor = None
+        if len(rows) > limit:
+            rows = rows[:limit]
+            next_cursor = _encode_cursor(rows[-1].created_at)
+        return Page(items=rows, next_cursor=next_cursor)
+
+    def mark_cancelled(self, *, workspace_id: uuid.UUID, job_id: uuid.UUID) -> ProcessingJob:
+        """Cancel a job that has not finished. Cancelling finished work is a conflict."""
+        job = self.get(workspace_id=workspace_id, job_id=job_id)
+        if job.status in _TERMINAL_JOB_STATUSES:
+            raise ConflictError("job_not_cancellable", f"job is already {job.status.lower()}")
+        job.status = "CANCELLED"
+        job.finished_at = datetime.now(UTC)
+        job.progress_note = "cancelled by user"
+        self.db.flush()
+        return job
+
+    def requeue(self, *, workspace_id: uuid.UUID, job_id: uuid.UUID) -> ProcessingJob:
+        """Reset a retired job so it can run again.
+
+        Only FAILED / DEAD_LETTER / CANCELLED jobs may be retried. Retrying a SUCCEEDED job is
+        refused: that is a re-run request with different semantics (see `/analyze?force=true`),
+        and conflating the two would let a retry silently discard good work.
+        """
+        job = self.get(workspace_id=workspace_id, job_id=job_id)
+        if job.status not in _RETRYABLE_JOB_STATUSES:
+            raise ConflictError(
+                "job_not_retryable",
+                f"only failed, dead-letter or cancelled jobs can be retried; this one is "
+                f"{job.status.lower()}",
+            )
+        job.status = "PENDING"
+        job.attempts = 0
+        job.progress = 0
+        job.progress_note = None
+        job.error_code = None
+        job.error_detail = None
+        job.finished_at = None
+        job.next_retry_at = None
         self.db.flush()
         return job
 

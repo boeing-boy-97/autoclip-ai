@@ -36,8 +36,11 @@ from app.db.models import (
     Transcript,
     TranscriptSegment,
 )
+from app.db.repositories import JobRepository
 from app.services.analysis import AnalysisError, AnalysisService
 from app.services.storage import StorageError, get_storage
+from app.services.transcription import AsrFailedError, AsrUnavailableError
+from app.worker.dispatch import BrokerUnavailableError, dispatch_analysis
 
 router = APIRouter(prefix="/workspaces/{workspace_id}/projects/{project_id}", tags=["Analysis"])
 
@@ -98,26 +101,66 @@ def analyse_project(
     ctx: WorkspaceEditor,  # noqa: ARG001
     force: Annotated[bool, Query(description="Re-run even if an identical run succeeded")] = False,
 ) -> AnalysisStatusOut:
-    """Run audio extraction → transcription → candidate detection → scoring.
+    """Queue audio extraction → transcription → candidate detection → scoring.
 
-    Runs synchronously today: the ASR engine is CPU-bound but bounded, and pretending to queue
-    work that no worker will pick up would be a lie. When Celery workers land, this endpoint will
-    enqueue and return immediately with the same response shape.
+    The work runs in a Celery worker, not in this request. The response is the *current* analysis
+    status: `status` reflects the project's stage, and `job_id` identifies the queued job so the
+    caller can poll `GET /jobs/{job_id}` for progress.
+
+    If an identical successful run already exists, nothing is queued and the existing result is
+    reported immediately (`reused=true`) — polling a finished analysis should never be a way to
+    accidentally pay for it twice.
     """
     project = _project(db, workspace_id, project_id)
+    settings = get_settings()
     storage = _storage()
-    service = AnalysisService(db, get_settings(), storage)
+
+    # Resolve idempotency and legality synchronously, before touching the broker: a request that
+    # cannot legally run must fail here with a precise error, not enqueue and fail later.
+    service = AnalysisService(db, settings, storage)
     try:
-        outcome = service.analyse(
+        plan = service.plan(
             workspace_id=workspace_id,
             project_id=project_id,
-            user_id=auth.user.id,
             force=force,
         )
     except AnalysisError as exc:
         raise ApiError(exc.code, exc.detail, status_code=exc.status_code) from exc
 
-    return _status(db, project, transcript_id=outcome.transcript_id)
+    if plan.reused:
+        return _status(db, project, transcript_id=plan.transcript_id)
+
+    try:
+        task_id = dispatch_analysis(
+            settings,
+            workspace_id=workspace_id,
+            project_id=project_id,
+            user_id=auth.user.id,
+            job_id=plan.job_id,
+            force=force,
+        )
+    except AnalysisError as exc:
+        # Eager mode runs the task in-request, so a pipeline failure arrives here as the same
+        # AnalysisError the synchronous implementation raised. Translate it back to the documented
+        # HTTP contract instead of letting it become a 500.
+        raise ApiError(exc.code, exc.detail, status_code=exc.status_code) from exc
+    except AsrUnavailableError as exc:
+        raise ApiError(exc.code, exc.detail, status_code=503) from exc
+    except AsrFailedError as exc:
+        raise ApiError(exc.code, exc.detail, status_code=422) from exc
+    except BrokerUnavailableError as exc:
+        # The job row is committed and PENDING, so the work is discoverable and retryable once
+        # the broker is back. Say that plainly instead of pretending the run started.
+        raise ApiError("queue_unavailable", str(exc), status_code=503) from exc
+
+    if task_id is not None:
+        jobs = JobRepository(db)
+        job = jobs.get(workspace_id=workspace_id, job_id=plan.job_id)
+        job.celery_task_id = task_id
+        db.commit()
+
+    out = _status(db, project, transcript_id=None)
+    return out.model_copy(update={"job_id": plan.job_id, "queued": True})
 
 
 @router.get("/analysis", response_model=AnalysisStatusOut, summary="Get Analysis Status")

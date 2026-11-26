@@ -69,6 +69,22 @@ from app.services.visual import VisualAnalysisError, VisualReport, analyse_frame
 
 
 @dataclass(slots=True)
+class AnalysisPlan:
+    """The decision made *before* any work starts.
+
+    Either an identical run already exists (`reused=True`, nothing to do) or a `processing_jobs`
+    row has been created and committed (`job_id`), ready to be dispatched. Keeping this separate
+    from execution lets the API reject an illegal request with a precise error *before* talking to
+    the broker, instead of enqueuing something that will fail minutes later.
+    """
+
+    job_id: uuid.UUID | None
+    reused: bool
+    transcript_id: uuid.UUID | None = None
+    fingerprint: str = ""
+
+
+@dataclass(slots=True)
 class AnalysisOutcome:
     transcript_id: uuid.UUID
     candidates: list[CandidateMoment]
@@ -95,13 +111,45 @@ _REPEATABLE_STATUSES = frozenset(
 # States in which analysis has already run: a repeat request should report, not restart.
 _ANALYSIS_DONE_STATUSES = frozenset({ProjectStage.MOMENT_DETECTION.value})
 
+# Absorbing states a job retry must be able to leave. FAILED and CANCELLED are terminal for the
+# *project* because nothing resumes them automatically -- but an explicit retry is not automation,
+# and refusing it would make the retry endpoint useless for the only case anyone calls it in.
+_RESUMABLE_STATUSES = frozenset({ProjectStage.FAILED.value, ProjectStage.CANCELLED.value})
+
 
 class AnalysisError(Exception):
+    """A pipeline failure with a machine-readable code and the HTTP status it implies.
+
+    `to_dict` exists because this exception crosses a process boundary when Celery reports it:
+    without a stable representation Celery can only pickle the class reference, and the worker log
+    ends up full of `UnpickleableExceptionWrapper(...)` instead of the actual failure reason.
+    """
+
     def __init__(self, code: str, detail: str, *, status_code: int = 422) -> None:
         super().__init__(detail)
         self.code = code
         self.detail = detail
         self.status_code = status_code
+
+    def to_dict(self) -> dict[str, object]:
+        return {"code": self.code, "detail": self.detail, "status_code": self.status_code}
+
+    @classmethod
+    def from_dict(cls, data: dict) -> AnalysisError:
+        return cls(
+            str(data.get("code", "analysis_failed")),
+            str(data.get("detail", "analysis failed")),
+            status_code=int(data.get("status_code", 422)),
+        )
+
+    def __reduce__(self) -> tuple:
+        # Celery pickles exceptions to report them. Reduce to plain JSON-safe primitives so a
+        # redelivered or re-raised error never depends on import order in another process.
+        return (_rebuild_analysis_error, (self.to_dict(),))
+
+
+def _rebuild_analysis_error(data: dict) -> AnalysisError:
+    return AnalysisError.from_dict(data)
 
 
 class AnalysisService:
@@ -115,6 +163,68 @@ class AnalysisService:
         self.audit = AuditRepository(db)
 
     # ------------------------------------------------------------------ entry point
+    def plan(
+        self,
+        *,
+        workspace_id: uuid.UUID,
+        project_id: uuid.UUID,
+        force: bool = False,
+    ) -> AnalysisPlan:
+        """Validate the request and reserve a job, without running any pipeline work.
+
+        Raises `AnalysisError` for every reason the request cannot legally run: no ready source, a
+        project beyond the analysis stages. Callers can therefore surface a precise 4xx *before*
+        enqueuing anything, rather than enqueueing a request doomed to fail minutes later.
+        """
+        project = self.projects.get(workspace_id=workspace_id, project_id=project_id)
+        source = self.sources.for_project(workspace_id=workspace_id, project_id=project_id)
+        if source is None or source.state != "ready":
+            raise AnalysisError(
+                "source_not_ready",
+                "this project has no ready source video; upload one before analysing",
+                status_code=409,
+            )
+
+        config = load_scoring_config(self.settings.scoring_config_path)
+        # A forced re-run must bypass the idempotency key, so the fingerprint is salted. Without
+        # this, `force=true` was accepted by the API and then silently ignored.
+        fingerprint = self._fingerprint(
+            source.sha256, config.version, salt=uuid.uuid4().hex if force else None
+        )
+
+        # MOMENT_DETECTION is the end of the analysis band, so an earlier completed run may be
+        # repeated. Any state beyond it means real work exists downstream of analysis and repeating
+        # it would discard results, so it is refused explicitly.
+        if project.status not in _REPEATABLE_STATUSES and not force:
+            raise AnalysisError(
+                "analysis_not_repeatable",
+                f"project is in {project.status}; analysis can only run while the project is "
+                f"within the analysis stages ({', '.join(sorted(_REPEATABLE_STATUSES))})",
+                status_code=409,
+            )
+
+        existing = self._existing_transcript(source.id, fingerprint, force=force)
+        if existing is None and not force and project.status in _ANALYSIS_DONE_STATUSES:
+            existing = self._latest_transcript(source.id)
+        if existing is not None:
+            return AnalysisPlan(
+                job_id=None, reused=True, transcript_id=existing.id, fingerprint=fingerprint
+            )
+
+        # `enqueue` is idempotent on the fingerprint: a copy already PENDING/RUNNING is returned
+        # rather than duplicated, so an impatient client cannot pay for two transcriptions.
+        job = self.jobs.enqueue(
+            workspace_id=workspace_id,
+            project_id=project_id,
+            stage="transcription",
+            task_name="analysis.run",
+            input_fingerprint=fingerprint,
+        )
+        # Commit before dispatching: if the process dies between commit and enqueue, the job is
+        # still discoverable as PENDING rather than vanishing without trace.
+        self.db.commit()
+        return AnalysisPlan(job_id=job.id, reused=False, fingerprint=fingerprint)
+
     def analyse(
         self,
         *,
@@ -122,7 +232,15 @@ class AnalysisService:
         project_id: uuid.UUID,
         user_id: uuid.UUID,
         force: bool = False,
+        job_id: uuid.UUID | None = None,
     ) -> AnalysisOutcome:
+        """Run the pipeline for an already-reserved job.
+
+        `job_id` is supplied when a Celery task drives the work: the API created and committed
+        that `processing_jobs` row before dispatching, so creating another one here would leave an
+        orphan PENDING job behind on every run. When it is None (the synchronous entry point) this
+        method reserves its own job first.
+        """
         started = time.monotonic()
         project = self.projects.get(workspace_id=workspace_id, project_id=project_id)
         source = self.sources.for_project(workspace_id=workspace_id, project_id=project_id)
@@ -141,9 +259,16 @@ class AnalysisService:
             source.sha256, config.version, salt=uuid.uuid4().hex if force else None
         )
 
-        # MOMENT_DETECTION is part of the analysis band, so an earlier completed run can be
-        # repeated. Any state beyond that means real work has been done downstream of analysis and
-        # repeating it would discard results, so it is refused explicitly.
+        # A retry carries an explicit job the user asked to re-run, so it may resume a project
+        # that is otherwise absorbing. This must happen BEFORE the gate below, or the gate
+        # rejects the retry before the resume ever runs.
+        if job_id is not None and project.status in _RESUMABLE_STATUSES:
+            self._resume(project)
+            project = self.projects.get(workspace_id=workspace_id, project_id=project_id)
+
+        # MOMENT_DETECTION is the end of the analysis band, so an earlier completed run may be
+        # repeated. Any state beyond it means real work exists downstream of analysis and repeating
+        # it would discard results, so it is refused explicitly.
         if project.status not in _REPEATABLE_STATUSES and not force:
             raise AnalysisError(
                 "analysis_not_repeatable",
@@ -159,6 +284,11 @@ class AnalysisService:
             # than failing a project that is already in a valid terminal-for-analysis state.
             existing = self._latest_transcript(source.id)
         if existing is not None:
+            if job_id is not None:
+                # An adopted job must never be left dangling in PENDING just because the work
+                # turned out to be already done. Close it with an honest note.
+                self._finish_job(job_id, workspace_id, note="existing transcript reused")
+                self.db.commit()
             candidates, scores, windows = self._load_candidates(project_id)
             return AnalysisOutcome(
                 transcript_id=existing.id,
@@ -169,20 +299,25 @@ class AnalysisService:
                 elapsed_seconds=round(time.monotonic() - started, 3),
             )
 
-        job = self.jobs.enqueue(
-            workspace_id=workspace_id,
-            project_id=project_id,
-            stage="transcription",
-            task_name="analysis.run",
-            input_fingerprint=fingerprint,
-        )
-        # Commit before doing the work: if the run fails, the failure-recording path starts with a
-        # rollback, which would otherwise discard this very job row and leave no trace at all.
-        self.db.commit()
+        if job_id is not None:
+            job_ref = job_id  # reserved by plan()/the API and already committed
+        else:
+            job = self.jobs.enqueue(
+                workspace_id=workspace_id,
+                project_id=project_id,
+                stage="transcription",
+                task_name="analysis.run",
+                input_fingerprint=fingerprint,
+            )
+            job_ref = job.id
+            # Commit before doing the work: if the run fails, the failure-recording path starts
+            # with a rollback, which would otherwise discard this very job row and leave no trace
+            # at all.
+            self.db.commit()
         scratch = Path(self.settings.tmp_root) / f"analysis-{project_id}-{uuid.uuid4().hex[:8]}"
         scratch.mkdir(parents=True, exist_ok=True)
         try:
-            self._mark_running(job.id, workspace_id)
+            self._mark_running(job_ref, workspace_id)
             self._enter(project, ProjectStage.AUDIO_EXTRACTION, task="extract_audio")
 
             source_path = self._materialise_source(source, scratch)
@@ -202,7 +337,7 @@ class AnalysisService:
             )
 
             self._enter(project, ProjectStage.TRANSCRIPTION, task="transcribe")
-            self._set_progress(job.id, workspace_id, 35, "transcribing audio")
+            self._set_progress(job_ref, workspace_id, 35, "transcribing audio")
             result = transcribe(
                 audio_path,
                 settings=self.settings,
@@ -220,11 +355,11 @@ class AnalysisService:
             # Audio analysis happens before visual analysis in the reviewed stage graph, so the
             # picture pass records its own scene rows here rather than being skipped.
             self._enter(project, ProjectStage.VISUAL_ANALYSIS, task="analyse_frames")
-            self._set_progress(job.id, workspace_id, 55, "detecting scenes and measuring frames")
+            self._set_progress(job_ref, workspace_id, 55, "detecting scenes and measuring frames")
             visual = self._run_visual(project=project, source_path=source_path, source=source)
 
             self._enter(project, ProjectStage.SEMANTIC_ANALYSIS, task="score_candidates")
-            self._set_progress(job.id, workspace_id, 75, "detecting and scoring candidate moments")
+            self._set_progress(job_ref, workspace_id, 75, "detecting and scoring candidate moments")
             candidates, scores, windows = self._detect_and_score(
                 project=project,
                 transcript=transcript,
@@ -261,7 +396,7 @@ class AnalysisService:
                     "asr_seconds": result.elapsed_seconds,
                 },
             )
-            self._finish_job(job.id, workspace_id, note=f"{len(candidates)} candidates")
+            self._finish_job(job_ref, workspace_id, note=f"{len(candidates)} candidates")
             self.db.flush()
             return AnalysisOutcome(
                 transcript_id=transcript.id,
@@ -272,14 +407,30 @@ class AnalysisService:
                 elapsed_seconds=round(time.monotonic() - started, 3),
             )
         except (AsrUnavailableError, AsrFailedError) as exc:
-            self._record_failure(job.id, workspace_id, project, exc.code, exc.detail)
+            self._record_failure(
+                job_ref,
+                workspace_id,
+                project,
+                exc.code,
+                exc.detail,
+                # The ASR engine being unavailable is an operator problem that may be fixed;
+                # finding no speech in the file will not change on a retry.
+                retryable=isinstance(exc, AsrUnavailableError),
+            )
             raise AnalysisError(
                 exc.code,
                 exc.detail,
                 status_code=503 if isinstance(exc, AsrUnavailableError) else 422,
             ) from exc
         except Exception as exc:
-            self._record_failure(job.id, workspace_id, project, "analysis_failed", str(exc)[:500])
+            self._record_failure(
+                job_ref,
+                workspace_id,
+                project,
+                "analysis_failed",
+                str(exc)[:500],
+                retryable=True,  # an unexpected error is exactly the kind worth re-attempting
+            )
             raise
         finally:
             shutil.rmtree(scratch, ignore_errors=True)
@@ -590,6 +741,8 @@ class AnalysisService:
         project: Project,
         code: str,
         detail: str,
+        *,
+        retryable: bool = False,
     ) -> None:
         """Best-effort failure bookkeeping that can never mask the original exception.
 
@@ -601,12 +754,30 @@ class AnalysisService:
         with contextlib.suppress(Exception):  # rollback must never mask the real error
             self.db.rollback()
         try:
-            self._fail_job(job_id, workspace_id, code, detail)
+            self._fail_job(job_id, workspace_id, code, detail, retryable=retryable)
             self._fail_project(project, code, detail)
             self.db.commit()
         except Exception as bookkeeping_error:  # noqa: BLE001
             self.db.rollback()
             self.audit_error = f"{type(bookkeeping_error).__name__}: {bookkeeping_error}"
+
+    def _resume(self, project: Project) -> None:
+        """Move a FAILED/CANCELLED project back onto the pipeline before re-running.
+
+        `_enter()` deliberately refuses to leave a terminal stage (see its docstring), so a retry
+        that reached a terminal project would silently do all the work and record none of it. The
+        single legal transition FAILED/CANCELLED -> MEDIA_INSPECTION exists in the graph for
+        exactly this reason: the user asked for this, it is not automation.
+        """
+        self.projects.transition(
+            workspace_id=project.workspace_id,
+            project_id=project.id,
+            target=ProjectStage.MEDIA_INSPECTION,
+            task_name="retry_analysis",
+            detail=f"resuming from {project.status} after an explicit retry",
+        )
+        # Keep the in-memory project in step; later `_enter` calls compare against it.
+        project.status = ProjectStage.MEDIA_INSPECTION.value
 
     def _enter(
         self, project: Project, stage: ProjectStage, *, task: str, detail: str | None = None
@@ -702,8 +873,28 @@ class AnalysisService:
     def _finish_job(self, job_id: uuid.UUID, workspace_id: uuid.UUID, *, note: str) -> None:
         self.jobs.mark_succeeded(workspace_id=workspace_id, job_id=job_id, note=note)
 
-    def _fail_job(self, job_id: uuid.UUID, workspace_id: uuid.UUID, code: str, detail: str) -> None:
-        self.jobs.mark_failed(workspace_id=workspace_id, job_id=job_id, code=code, detail=detail)
+    def _fail_job(
+        self,
+        job_id: uuid.UUID,
+        workspace_id: uuid.UUID,
+        code: str,
+        detail: str,
+        *,
+        retryable: bool = False,
+    ) -> None:
+        """Record the failure and say whether it *could* succeed on another attempt.
+
+        `retryable` matters: it is the only way a job ever reaches DEAD_LETTER (retryable but out
+        of attempts), which is the state that tells a human to look. Hardcoding it to False made
+        DEAD_LETTER unreachable and quietly mislabelled transient failures as permanent.
+        """
+        self.jobs.mark_failed(
+            workspace_id=workspace_id,
+            job_id=job_id,
+            code=code,
+            detail=detail,
+            retryable=retryable,
+        )
 
     def _fail_project(self, project: Project, code: str, detail: str) -> None:
         """Illegal transitions are swallowed here on purpose.

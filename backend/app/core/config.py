@@ -70,6 +70,10 @@ class Settings(BaseSettings):
     celery_broker_url: str | None = None
     celery_result_backend: str | None = None
     celery_task_always_eager: bool = False
+    celery_task_time_limit: int = 1800
+    celery_task_soft_time_limit: int = 1740
+    # A RUNNING job whose heartbeat is older than this is presumed dead and is reclaimed.
+    job_stuck_after_seconds: int = 900
 
     # ---------------------------------------------------------------- storage
     storage_backend: StorageBackend = "local"

@@ -8,8 +8,11 @@ Invariants encoded here
 -----------------------
 * Every stage belongs to the enum declared in the database (`project_status`).
 * Illegal transitions raise; nothing is silently coerced.
-* FAILED and CANCELLED are absorbing: a project resumes by *creating a new job*, never by
-  moving itself out of a terminal state behind the user's back.
+* FAILED and CANCELLED are absorbing *for automation*: nothing advances them on its own. A
+  project resumes by creating a new job, and the one edge that leaves these states
+  (-> MEDIA_INSPECTION) exists solely so an explicit, user-requested retry can record the work it
+  redoes. Without that edge a retry would re-run the pipeline while the journal silently skipped
+  every stage, leaving a project marked FAILED with a fresh transcript under it.
 * PUBLISHED is only reachable from PUBLISHING or SCHEDULED, and PUBLISHING only from APPROVED —
   so nothing can be published that was not explicitly approved.
 """
@@ -112,8 +115,9 @@ STAGE_GRAPH: dict[ProjectStage, frozenset[ProjectStage]] = {
     ProjectStage.SCHEDULED: frozenset({ProjectStage.PUBLISHED, ProjectStage.APPROVED}),
     ProjectStage.PUBLISHED: frozenset({ProjectStage.COMPLETED}),
     ProjectStage.COMPLETED: frozenset(),
-    ProjectStage.FAILED: frozenset(),
-    ProjectStage.CANCELLED: frozenset(),
+    # Only an explicit retry takes these edges; no automated path advances out of a terminal state.
+    ProjectStage.FAILED: frozenset({ProjectStage.MEDIA_INSPECTION}),
+    ProjectStage.CANCELLED: frozenset({ProjectStage.MEDIA_INSPECTION}),
 }
 
 # Any non-terminal stage may fail or be cancelled.
