@@ -90,6 +90,7 @@ class Settings(BaseSettings):
     # ---------------------------------------------------------------- media
     ffmpeg_bin: str = "ffmpeg"
     ffprobe_bin: str = "ffprobe"
+    template_dir: str = "config/templates"
     audio_target_lufs: float = -14.0
     audio_true_peak_dbtp: float = -1.0
     # Path to the scoring weights. Relative to the process working directory (the repo root in

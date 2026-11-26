@@ -18,7 +18,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any, ClassVar
 
-from sqlalchemy import Select, func, or_, select
+from sqlalchemy import Select, delete, func, or_, select
 from sqlalchemy.orm import Session, selectinload
 
 from app.core.netutil import valid_ip
@@ -30,6 +30,9 @@ from app.core.stage_graph import (
 )
 from app.db.models import (
     AuditLog,
+    Clip,
+    ClipVersion,
+    MediaAsset,
     Notification,
     ProcessingJob,
     Project,
@@ -669,6 +672,75 @@ class JobRepository:
         job.next_retry_at = None
         self.db.flush()
         return job
+
+
+# --------------------------------------------------------------------------- clips
+
+
+class ClipRepository:
+    def __init__(self, db: Session) -> None:
+        self.db = db
+
+    def get(
+        self, *, workspace_id: uuid.UUID, clip_id: uuid.UUID, with_deleted: bool = False
+    ) -> Clip:
+        stmt = select(Clip).where(Clip.id == clip_id, Clip.workspace_id == workspace_id)
+        if not with_deleted:
+            stmt = stmt.where(Clip.deleted_at.is_(None))
+        clip = self.db.scalar(stmt)
+        if clip is None:
+            raise NotFoundError("clip", clip_id)
+        return clip
+
+    def list_for_project(
+        self,
+        *,
+        workspace_id: uuid.UUID,
+        project_id: uuid.UUID,
+        state: str | None = None,
+        limit: int = 50,
+        cursor: str | None = None,
+    ) -> Page:
+        """Clips for a project, oldest first.
+
+        Ascending by `created_at` because clips are a list to review in order, unlike jobs and
+        projects where the newest matters most.
+        """
+        stmt = select(Clip).where(
+            Clip.workspace_id == workspace_id,
+            Clip.project_id == project_id,
+            Clip.deleted_at.is_(None),
+        )
+        if state:
+            stmt = stmt.where(Clip.state == state)
+        if cursor:
+            stmt = stmt.where(Clip.created_at > _decode_cursor(cursor))
+        rows = list(
+            self.db.scalars(stmt.order_by(Clip.created_at.asc()).limit(limit + 1))
+        )
+        next_cursor = None
+        if len(rows) > limit:
+            rows = rows[:limit]
+            next_cursor = _encode_cursor(rows[-1].created_at)
+        return Page(items=rows, next_cursor=next_cursor)
+
+    def versions(self, *, clip_id: uuid.UUID) -> list[ClipVersion]:
+        return list(
+            self.db.scalars(
+                select(ClipVersion)
+                .where(ClipVersion.clip_id == clip_id)
+                .order_by(ClipVersion.version_no.desc())
+            )
+        )
+
+    def delete_derived(self, *, clip_id: uuid.UUID) -> None:
+        """Remove rendered versions and their assets before deleting the clip itself.
+
+        The schema's FKs would null them out rather than cascade, which would leave orphaned
+        files on disk with nothing pointing at them.
+        """
+        self.db.execute(delete(ClipVersion).where(ClipVersion.clip_id == clip_id))
+        self.db.execute(delete(MediaAsset).where(MediaAsset.clip_id == clip_id))
 
 
 # --------------------------------------------------------------------------- audit

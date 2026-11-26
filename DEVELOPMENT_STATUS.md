@@ -492,17 +492,116 @@ documented in `.env.example`, which `phase0_verify.sh` checks.
   invoked, but nothing schedules it. Until beat is deployed, a lost worker needs a manual sweep.
 - The synchronisation section of the plan below is otherwise unchanged.
 
+## 4D. Phase 3 (partial) — Clip rendering with captions (COMPLETE)
+
+The Phase 2 pipeline ends with ranked candidate moments. This slice turns a moment into a file a
+person could actually post: a vertical 1080x1920 clip, cut on the moment's own window, with
+captions burned from the word timings the ASR recorded.
+
+### What was built
+
+- `app/services/captions.py` — cue construction from stored word timings only. `words_from_segments`
+  flattens the persisted `transcript_segments.words` payload; words with no timing are **dropped and
+  counted**, never given an invented one. Cues break on a maximum word budget and on a silence gap,
+  are re-based to clip-relative time (`0` = clip start), and are truncated at the clip end with the
+  truncation reported. Emits WebVTT and ASS.
+- `app/services/render.py` — `Template.load` reads `config/templates/*.yaml` (resolved against the
+  repo root, see the bug below); `nudge_to_word_gap` moves a cut off a word boundary and *records*
+  the delta; `build_plan` produces a serialisable `RenderPlan`; `render_clip` runs FFmpeg and then
+  **verifies the output** with `ffprobe` — exact canvas size and a real audio stream, or it fails.
+- `app/services/clips.py` — `ClipService.generate()` (idempotent, one clip per selected moment) and
+  `ClipService.render()` (one new `clip_versions` row per render, storing the clip file, the ASS
+  sidecar, the plan and a sha256 of the output).
+- `app/api/v1/clips.py` — 8 routes: `POST .../generate-clips`, `GET .../clips`,
+  `GET .../clips/{id}`, `POST .../clips/{id}/render`, `GET .../clips/{id}/versions`,
+  `GET .../clips/{id}/render-plan`, `GET .../clips/{id}/captions`, `GET .../clips/{id}/download`.
+- `app/db/repositories.py` — `ClipRepository`; `app/api/schemas.py` — the clip response models.
+
+The implemented surface is now **34 operations / 30 paths / 34 schemas**. The reviewed contract in
+`docs/openapi.json` is unchanged at 62 operations / 53 paths / 43 schemas.
+
+### Live evidence (real FFmpeg, real libass, real Whisper output, real PostgreSQL)
+
+```
+POST /generate-clips -> 201 {created: 1, existing: 0, candidates_selected: 1}
+POST /generate-clips again -> 201 {created: 0, existing: 1}      (idempotent)
+
+GET /clips
+  "When I started, I spent three weeks copying e…"  window 7880-19680 ms  state DRAFT
+  metadata.category / rationale / generated_from all present
+
+GET /clips/{id}/captions
+  10 cues, coverage 1.0, words_without_timing 0, warnings []
+  cue 0:      0 -  1240  "When I started, I"
+  cue 9:  10520 - 11800  "about and finish it."
+  every cue <= 4 words (the template's budget), VTT emitted
+
+POST /clips/{id}/render -> 201
+  QA_PASSED, 1080x1920, 11800 ms, 2573439 bytes, 6.29 s wall
+  has_captions true, cue_count 10, publishable true
+GET /clips/{id}/versions -> 1 version, sha256 recorded, 2513 KB
+GET /clips/{id}/render-plan -> window 7880-19680, source 640x360,
+  adjustments {start_delta_ms: 0, end_delta_ms: 0, reason: []}
+
+POST /clips/{id}/render on a QA_PASSED clip -> 409 clip_not_renderable
+```
+
+The rendered file was then re-probed independently (`ffprobe` on the stored bytes):
+`h264 1080x1920 + aac audio`. The claim is about the bytes, not the plan.
+
+A frame was extracted and looked at, which is how the two geometry bugs below were found.
+
+### Bugs found while building this (all fixed)
+
+1. **Captions covered the middle of the frame.** `per_cue` was computed as
+   `max_words_per_cue * max_lines`, so a 4-word style produced 8-word cues that wrapped to four
+   lines. `max_words_per_cue` already means "words visible at once"; the multiplication was simply
+   wrong. Now `per_cue = max_words_per_cue`.
+2. **The caption block sat too high.** `lower_third` used a 35%-of-script-height bottom margin,
+   which with the script resolution put it over the subject. Now 14%; a frame was re-extracted and
+   confirmed at roughly 72% down the frame.
+3. **Every template failed to load in the API**, though the same call worked in a script run from
+   the repo root: the template directory was resolved relative to the process CWD. Anchored to
+   `__file__` via `resolve_template_dir()`.
+4. **A missing template returned 500 instead of 422.** `Template.load` sat *above* the
+   `try/except RenderError`, so the error escaped the handler. Loading is now inside the guard and
+   translates to `ClipError(422)`.
+5. **`clips.meta` does not exist.** The DDL column is `metadata`, but `metadata` is taken by
+   SQLAlchemy's schema registry on a declarative class (and assigning it raises), so the mapped
+   attribute is `meta` with `mapped_column("metadata", ...)`.
+6. **`Mapped[bytes | None]` could not be resolved** on `ClipVersion.sha256`: inside a `Mapped[]`
+   annotation the name `bytes` resolves against the enclosing class's own `bytes` column. Annotated
+   as `Mapped[LargeBinary | None]`.
+7. The new `template_dir` setting was missing from `.env.example`, caught by `phase0_verify.sh` —
+   the same gate that caught `job_stuck_after_seconds` in §4C.
+
+### What is deliberately not claimed
+
+- **Cut nudging is implemented but not wired into the render call site.** `nudge_to_word_gap` is
+  tested and records its deltas, but `ClipService.render` still renders the moment's exact window,
+  so the live render plan shows `start_delta_ms: 0, end_delta_ms: 0`. Applying it is the next slice.
+- **No re-render of a reviewed clip.** Only `DRAFT` and `QA_FAILED` clips render; a `QA_PASSED` clip
+  returns 409. There is no "reject and re-render" endpoint yet, so version 2 is currently
+  unreachable through the API even though the versioning machinery supports it.
+- **No subjective/visual QA on the rendered clip itself.** `QA_PASSED` here means "the render was
+  verified structurally", not "the clip looks good". The Phase 2 visual metrics have not been
+  reused as the QC report yet.
+- **Sharpness/quality is capped by the source.** The fixture is 640x360; upscaling it to 1080x1920
+  is honest arithmetic, not recovery of detail.
+- **No signed download URLs with the local storage backend** — `download_url` is `null` and the
+  response says so, rather than returning a link that would 404.
+- **Beat is still not deployed**, so `analysis.sweep_stuck` remains unscheduled (§4C).
+
 ## 5. Outstanding limitations (stated, not hidden)
 
 ### Expected at this phase
 1. **No frontend yet.** The Next.js app is still scaffolding; the backend API is fully exercisable
    via HTTP (see the live evidence in §4A) but there is no UI. This is the largest remaining gap.
-2. **Analysis, clip generation, rendering and publishing are not implemented.** They are specified
-   in `docs/openapi.json` and blocked out in `config/*.yaml`, and will be Phase 2+.
-3. **No background worker yet.** Ingest runs synchronously inside the request (media probing is
-   CPU-bound but bounded); Celery wiring, job records and retries arrive with Phase 2, which is
-   when the ~30 s probe should move off the request path.
-4. **Timeline thumbnails, waveform peaks and the full 9:16 render preview** do not exist yet.
+2. **Publishing is not implemented.** Analysis, clip generation and 9:16 rendering now work (§4C,
+   §4D); YouTube upload remains specified-only.
+3. **No frontend yet** — see item 1.
+4. **Timeline thumbnails and waveform peaks** do not exist yet. A rendered 9:16 clip does exist and
+   is retrievable, but there is no preview player in a UI.
 
 ### External dependencies that cannot be demonstrated here
 4. **YouTube publishing cannot be exercised** without operator-supplied OAuth client credentials
@@ -556,9 +655,9 @@ anywhere in the output.
    `POST /jobs/{id}/cancel|retry`.~~ **Done — see §4C.** Remaining from this item: a beat schedule
    for `analysis.sweep_stuck`, and genuine mid-stage checkpointing if true resumability is wanted
    (today a retry restarts the analysis, it does not resume it).
-3. **Clip rendering.** Cut, reframe to 9:16, burn captions from the stored word timings, persist
-   `clips` + `clip_versions`. Captions must come from real timings; where the ASR gave none,
-   the clip must not pretend it has them.
+3. ~~**Clip rendering.** Cut, reframe to 9:16, burn captions from the stored word timings, persist
+   `clips` + `clip_versions`.~~ **Done — see §4D.** Remaining: apply the word-gap nudge at the
+   render call site, and a reject/re-render path so a reviewed clip can be re-cut.
 4. **Quality check** — reuse the Phase 2 visual metrics as the objective half of the QC report.
 5. **YouTube OAuth and publish** — needs real credentials; until then the honest
    `youtube_not_configured` path stays.

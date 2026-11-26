@@ -111,6 +111,12 @@ moment_category_enum = Enum(
     "tutorial", "memorable_conclusion", "reaction", "other",
     name="moment_category", create_type=False,
 )
+clip_state_enum = Enum(
+    "DRAFT", "RENDERING", "QA_FAILED", "QA_PASSED", "AWAITING_REVIEW",
+    "APPROVED", "REJECTED", "PUBLISHED", "ARCHIVED",
+    name="clip_state",
+    create_type=False,
+)
 notification_kind_enum = Enum(
     "analysis_complete", "clips_ready", "qa_failed", "approval_needed", "publish_success",
     "publish_failed", "auth_expired", "budget_warning", "storage_warning", "system",
@@ -332,7 +338,9 @@ class SourceVideo(Base, TimestampMixin):
     # NOTE: the attribute is `byte_size` (not `bytes`) on purpose — see the comment on
     # MediaAsset.byte_size. The database column is still named `bytes`.
     byte_size: Mapped[int | None] = mapped_column("bytes", BigInteger)
-    sha256: Mapped[bytes | None] = mapped_column(LargeBinary)
+    # Annotated as `LargeBinary` rather than `bytes | None`: inside a Mapped[] annotation the name
+    # `bytes` resolves against the declarative class's own `bytes` column and fails to de-stringify.
+    sha256: Mapped[LargeBinary | None] = mapped_column(LargeBinary)
     storage_key: Mapped[str | None] = mapped_column(Text)
     youtube_video_id: Mapped[str | None] = mapped_column(Text)
     youtube_metadata: Mapped[dict | None] = mapped_column(JSONB)
@@ -384,13 +392,16 @@ class MediaAsset(Base):
         ForeignKey("projects.id", ondelete="CASCADE")
     )
     clip_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True))
+    clip_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True))
     kind: Mapped[str] = mapped_column(media_asset_kind_enum, nullable=False)
     storage_key: Mapped[str] = mapped_column(Text, unique=True, nullable=False)
     # The DB column is `bytes`, but a Python attribute of that name shadows the builtin
     # `bytes` while annotations are evaluated, so `Mapped[bytes | None]` would resolve the
     # builtin to a SQLAlchemy type. Attribute renamed; column name preserved.
     byte_size: Mapped[int | None] = mapped_column("bytes", BigInteger)
-    sha256: Mapped[bytes | None] = mapped_column(LargeBinary)
+    # Annotated as `LargeBinary` rather than `bytes | None`: inside a Mapped[] annotation the name
+    # `bytes` resolves against the declarative class's own `bytes` column and fails to de-stringify.
+    sha256: Mapped[LargeBinary | None] = mapped_column(LargeBinary)
     mime: Mapped[str | None] = mapped_column(Text)
     duration_ms: Mapped[int | None] = mapped_column(Integer)
     width: Mapped[int | None] = mapped_column(Integer)
@@ -751,3 +762,101 @@ class VideoAnalysis(Base):
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), nullable=False
     )
+
+
+class Clip(Base):
+    """A renderable window of the source, derived from a candidate moment.
+
+    `start_ms`/`end_ms` are authoritative: a clip's range is fixed before rendering so the
+    caption cues and the cut refer to the same timeline. The CHECK constraints in the database
+    enforce `duration_ms == end_ms - start_ms`; nothing recomputes it silently.
+    """
+
+    __tablename__ = "clips"
+
+    id: Mapped[uuid.UUID] = _uuid_pk()
+    project_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("projects.id", ondelete="CASCADE"), nullable=False
+    )
+    workspace_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("workspaces.id", ondelete="CASCADE"), nullable=False
+    )
+    source_video_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), nullable=False)
+    candidate_moment_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("candidate_moments.id", ondelete="SET NULL")
+    )
+    title: Mapped[str] = mapped_column(Text, nullable=False)
+    start_ms: Mapped[int] = mapped_column(Integer, nullable=False)
+    end_ms: Mapped[int] = mapped_column(Integer, nullable=False)
+    duration_ms: Mapped[int] = mapped_column(Integer, nullable=False)
+    state: Mapped[str] = mapped_column(clip_state_enum, nullable=False, server_default="DRAFT")
+    layout: Mapped[str] = mapped_column(
+        Text, nullable=False, server_default="single_subject"
+    )
+    template_key: Mapped[str] = mapped_column(Text, nullable=False, server_default="podcast")
+    current_version_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True))
+    # The column is `metadata` in the reviewed DDL. `metadata` is taken by SQLAlchemy's schema
+    # registry on a declarative class (and assigning it is an error), so the attribute is `meta`
+    # and the column name is given explicitly.
+    meta: Mapped[dict] = mapped_column("metadata", JSONB, nullable=False, server_default="{}")
+    thumbnail_asset_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("media_assets.id")
+    )
+    publishable: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default="false")
+    rejection_reason: Mapped[str | None] = mapped_column(Text)
+    approved_by: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("users.id"))
+    approved_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
+    deleted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+    __table_args__ = (
+        Index("ix_clips_project_state", "project_id", "state"),
+        Index("ix_clips_ws_created", "workspace_id", "created_at"),
+    )
+
+
+class ClipVersion(Base):
+    """One immutable render of a clip, with the plan that produced it.
+
+    `render_plan` is the declarative record of exactly what was asked for — trim, crop, caption
+    style, encoder settings. Without it a rendered file is unexplainable, and re-rendering after a
+    bug fix could not be compared against the original.
+    """
+
+    __tablename__ = "clip_versions"
+
+    id: Mapped[uuid.UUID] = _uuid_pk()
+    clip_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("clips.id", ondelete="CASCADE"), nullable=False
+    )
+    version_no: Mapped[int] = mapped_column(Integer, nullable=False)
+    render_plan: Mapped[dict] = mapped_column(JSONB, nullable=False)
+    render_plan_version: Mapped[int] = mapped_column(Integer, nullable=False, server_default="1")
+    video_asset_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("media_assets.id"))
+    caption_asset_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("media_assets.id"))
+    thumbnail_asset_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("media_assets.id"))
+    width: Mapped[int | None] = mapped_column(Integer)
+    height: Mapped[int | None] = mapped_column(Integer)
+    duration_ms: Mapped[int | None] = mapped_column(Integer)
+    bytes: Mapped[int | None] = mapped_column(BigInteger)
+    # Annotated as `LargeBinary` rather than `bytes | None`: inside a Mapped[] annotation the name
+    # `bytes` resolves against the declarative class's own `bytes` column and fails to de-stringify.
+    sha256: Mapped[LargeBinary | None] = mapped_column(LargeBinary)
+    render_seconds: Mapped[float | None] = mapped_column(Numeric(10, 3))
+    encoder_log_ref: Mapped[str | None] = mapped_column(Text)
+    source: Mapped[str] = mapped_column(Text, nullable=False, server_default="initial")
+    parent_version_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("clip_versions.id")
+    )
+    created_by: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("users.id"))
+    rendered_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
+
+    __table_args__ = (Index("ux_clip_versions_no", "clip_id", "version_no", unique=True),)

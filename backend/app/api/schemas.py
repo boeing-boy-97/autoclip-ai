@@ -11,7 +11,7 @@ import uuid
 from datetime import datetime
 from typing import Any
 
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import AliasChoices, BaseModel, ConfigDict, Field, model_validator
 
 from app.db.models import User
 from app.db.models import Workspace as WorkspaceModel
@@ -433,3 +433,109 @@ class AnalysisStatusOut(BaseModel):
     # GET /jobs/{job_id} rather than being told nothing and guessing.
     job_id: uuid.UUID | None = None
     queued: bool = False
+
+
+# --------------------------------------------------------------------------- clips
+
+
+class ClipVersionOut(BaseModel):
+    id: uuid.UUID
+    version_no: int
+    source: str
+    width: int | None = None
+    height: int | None = None
+    duration_ms: int | None = None
+    bytes: int | None = None
+    sha256: str | None = None
+    video_url: str | None = None
+    caption_url: str | None = None
+    render_seconds: float | None = None
+    rendered_at: datetime | None = None
+    created_at: datetime
+
+    @classmethod
+    def build(cls, version, *, video_url=None, caption_url=None) -> ClipVersionOut:  # noqa: ANN001
+        return cls(
+            id=version.id,
+            version_no=version.version_no,
+            source=version.source,
+            width=version.width,
+            height=version.height,
+            duration_ms=version.duration_ms,
+            bytes=version.bytes,
+            sha256=version.sha256.hex() if version.sha256 else None,
+            video_url=video_url,
+            caption_url=caption_url,
+            render_seconds=float(version.render_seconds) if version.render_seconds else None,
+            rendered_at=version.rendered_at,
+            created_at=version.created_at,
+        )
+
+
+class ClipOut(ORMModel):
+    id: uuid.UUID
+    project_id: uuid.UUID
+    title: str
+    state: str
+    start_ms: int
+    end_ms: int
+    duration_ms: int
+    layout: str
+    template_key: str
+    publishable: bool
+    candidate_moment_id: uuid.UUID | None = None
+    current_version_id: uuid.UUID | None = None
+    metadata: dict = Field(default_factory=dict, validation_alias=AliasChoices("meta", "metadata"),
+                           serialization_alias="metadata")
+    rejection_reason: str | None = None
+    created_at: datetime | None = None
+
+    model_config = ConfigDict(populate_by_name=True, from_attributes=True)
+
+
+class ClipPage(BaseModel):
+    items: list[ClipOut]
+    next_cursor: str | None = None
+
+
+class ClipGenerationOut(BaseModel):
+    created: int
+    existing: int
+    clip_ids: list[uuid.UUID]
+    candidates_selected: int
+
+
+class ClipRenderOut(BaseModel):
+    clip_id: uuid.UUID
+    version_id: uuid.UUID
+    version_no: int
+    state: str
+    width: int
+    height: int
+    duration_ms: int
+    bytes: int
+    has_captions: bool
+    cue_count: int
+    render_seconds: float
+
+
+class CaptionCueOut(BaseModel):
+    start_ms: int
+    end_ms: int
+    text: str
+    word_count: int
+
+
+class CaptionsOut(BaseModel):
+    language: str | None = None
+    style_key: str | None = None
+    source: str
+    cue_count: int
+    coverage: float
+    words_in_range: int
+    words_captioned: int
+    words_without_timing: int
+    truncated_at_clip_end: int
+    warnings: list[str] = []
+    cues: list[CaptionCueOut]
+    vtt: str
