@@ -296,6 +296,78 @@ class TestRendering:
         assert "no signed URL" in body["note"]
 
 
+class TestBoundaryNudge:
+    def test_a_cut_inside_a_word_is_moved_and_recorded(self, alice: Actor, ready_project: str):
+        """The fixture's real moment happens to start on a clean boundary, so the nudge path is
+        exercised by moving the stored window into the middle of a spoken word first."""
+        generate(alice, ready_project)
+        clip = list_clips(alice, ready_project)[0]
+        original_start, original_end = clip["start_ms"], clip["end_ms"]
+
+        from sqlalchemy import update
+
+        from app.db.models import Clip
+        from app.db.session import session_scope
+
+        # 40 ms in lands mid-word ("When" spans 7880-8000 in the fixture's transcript); 120 ms
+        # would land exactly on the next word's start and be a clean cut by accident.
+        # `ck_clip_dur` requires duration_ms = end_ms - start_ms, so move all three together.
+        moved_start = original_start + 40
+        with session_scope() as db:
+            db.execute(
+                update(Clip)
+                .where(Clip.id == clip["id"])
+                .values(
+                    start_ms=moved_start,
+                    end_ms=original_end,
+                    duration_ms=original_end - moved_start,
+                )
+            )
+
+        resp = alice.client.post(
+            f"/api/v1/workspaces/{alice.workspace_id}/clips/{clip['id']}/render",
+            headers=alice.headers,
+        )
+        assert resp.status_code == 201, resp.text
+
+        plan = alice.client.get(
+            f"/api/v1/workspaces/{alice.workspace_id}/clips/{clip['id']}/render-plan",
+            headers=alice.headers,
+        ).json()["render_plan"]
+        assert plan["window"]["start_ms"] != moved_start, "the cut must not sit inside a word"
+        assert plan["adjustments"]["start_delta_ms"] == -40
+        assert plan["adjustments"]["reason"], "a move must be explained, never silent"
+        # The word must now be whole on the picture as well as in the plan.
+        assert plan["window"]["start_ms"] % 40 == 0
+
+    def test_captions_follow_the_nudged_window(self, alice: Actor, ready_project: str):
+        """Captions and picture must describe the same interval: no cue may start before frame 0."""
+        generate(alice, ready_project)
+        clip = list_clips(alice, ready_project)[0]
+
+        from sqlalchemy import update
+
+        from app.db.models import Clip
+        from app.db.session import session_scope
+
+        nudged_start = clip["start_ms"] + 40
+        with session_scope() as db:
+            db.execute(
+                update(Clip)
+                .where(Clip.id == clip["id"])
+                .values(
+                    start_ms=nudged_start,
+                    duration_ms=clip["end_ms"] - nudged_start,
+                )
+            )
+
+        body = alice.client.get(
+            f"/api/v1/workspaces/{alice.workspace_id}/clips/{clip['id']}/captions",
+            headers=alice.headers,
+        ).json()
+        assert body["cues"][0]["start_ms"] == 0
+
+
 class TestClipAuthorization:
     def test_bob_cannot_see_or_render_alices_clips(
         self, alice: Actor, bob: Actor, ready_project: str

@@ -233,7 +233,15 @@ class ClipService:
                 workspace_id=workspace_id, job_id=job_ref, progress=15, note="cutting and reframing"
             )
 
-            track = self._caption_track(clip, template)
+            # Resolve the cut first, then caption it. Building captions from the pre-nudge window
+            # and rendering the post-nudge window would put both files on slightly different
+            # timelines — a cue could start before the picture does.
+            words = self._words_in_window(clip)
+            start_ms, end_ms, adjustments = nudge_to_word_gap(clip.start_ms, clip.end_ms, words)
+            if adjustments.get("reason"):
+                logger.info("clip boundaries adjusted", extra={"clip_id": str(clip_id)})
+
+            track = self._caption_track(clip, template, start_ms=start_ms, end_ms=end_ms)
             ass_path, _vtt_path = write_captions(
                 track,
                 out_dir=scratch,
@@ -246,12 +254,6 @@ class ClipService:
                 position=str(template.caption_style.get("position", "lower_third")),
                 max_lines=template.max_lines,
             )
-
-            # Keep the cut out of the middle of a spoken word, and record what moved.
-            words = self._words_in_window(clip)
-            start_ms, end_ms, adjustments = nudge_to_word_gap(clip.start_ms, clip.end_ms, words)
-            if adjustments.get("reason"):
-                logger.info("clip boundaries adjusted", extra={"clip_id": str(clip_id)})
 
             src_w, src_h = probe_source_size(source_path, self.settings.ffprobe_bin)
             plan = build_plan(
@@ -394,12 +396,14 @@ class ClipService:
         except Exception:  # noqa: BLE001
             self.db.rollback()
 
-    def _caption_track(self, clip: Clip, template: Template) -> CaptionTrack:
+    def _caption_track(
+        self, clip: Clip, template: Template, *, start_ms: int, end_ms: int
+    ) -> CaptionTrack:
         segments = self._segments_for(clip)
         return build_track(
             segments,
-            clip_start_ms=clip.start_ms,
-            clip_end_ms=clip.end_ms,
+            clip_start_ms=start_ms,
+            clip_end_ms=end_ms,
             max_words_per_cue=template.max_words_per_cue,
             max_lines=template.max_lines,
         )

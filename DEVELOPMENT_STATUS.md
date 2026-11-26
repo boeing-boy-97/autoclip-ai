@@ -566,20 +566,27 @@ A frame was extracted and looked at, which is how the two geometry bugs below we
 4. **A missing template returned 500 instead of 422.** `Template.load` sat *above* the
    `try/except RenderError`, so the error escaped the handler. Loading is now inside the guard and
    translates to `ClipError(422)`.
-5. **`clips.meta` does not exist.** The DDL column is `metadata`, but `metadata` is taken by
+5. **Captions were built from the pre-nudge window while the render used the post-nudge one.**
+   The two files would have described slightly different intervals, so a cue could begin before
+   the picture did. The cut is now resolved *first*, and both the caption track and the plan are
+   derived from that one authoritative window.
+6. **A 2.9 GB model cache had been left inside the repo** (`backend/models/`), invisible to
+   `git status --short` only until it was noticed in the file list. Removed, and the path is now
+   gitignored.
+7. **`clips.meta` does not exist.** The DDL column is `metadata`, but `metadata` is taken by
    SQLAlchemy's schema registry on a declarative class (and assigning it raises), so the mapped
    attribute is `meta` with `mapped_column("metadata", ...)`.
-6. **`Mapped[bytes | None]` could not be resolved** on `ClipVersion.sha256`: inside a `Mapped[]`
+8. **`Mapped[bytes | None]` could not be resolved** on `ClipVersion.sha256`: inside a `Mapped[]`
    annotation the name `bytes` resolves against the enclosing class's own `bytes` column. Annotated
    as `Mapped[LargeBinary | None]`.
-7. The new `template_dir` setting was missing from `.env.example`, caught by `phase0_verify.sh` —
+9. The new `template_dir` setting was missing from `.env.example`, caught by `phase0_verify.sh` —
    the same gate that caught `job_stuck_after_seconds` in §4C.
 
 ### What is deliberately not claimed
 
-- **Cut nudging is implemented but not wired into the render call site.** `nudge_to_word_gap` is
-  tested and records its deltas, but `ClipService.render` still renders the moment's exact window,
-  so the live render plan shows `start_delta_ms: 0, end_delta_ms: 0`. Applying it is the next slice.
+- **The live fixture happens to cut on clean word boundaries**, so its render plan shows
+  `start_delta_ms: 0, end_delta_ms: 0`. The nudge path is exercised by an integration test that
+  moves a stored window 40 ms into a word and asserts the cut snaps back and the reason is recorded.
 - **No re-render of a reviewed clip.** Only `DRAFT` and `QA_FAILED` clips render; a `QA_PASSED` clip
   returns 409. There is no "reject and re-render" endpoint yet, so version 2 is currently
   unreachable through the API even though the versioning machinery supports it.
