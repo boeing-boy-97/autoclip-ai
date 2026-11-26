@@ -49,3 +49,5 @@ celerybeat-schedule*
 .idea/
 .vscode/
 *.swp
+.ruff_cache/
+.pytest_cache/
