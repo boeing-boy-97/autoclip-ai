@@ -1,0 +1,99 @@
+# =====================================================================================
+# Analysis pipeline tuning (salience sampling, ASR, vision, prompts).
+# Loaded once per worker; changes require a worker restart (no hot reload by design).
+# =====================================================================================
+version: "2026-01-v1"
+
+probe:
+  require_audio_stream: true
+  require_video_stream: true
+  allowed_containers: [mp4, mov, mkv, webm, m4v, avi]
+  allowed_video_codecs: [h264, hevc, vp9, av1, mpeg4]
+  allowed_audio_codecs: [aac, mp3, opus, vorbis, pcm_s16le, ac3]
+  min_duration_ms: 20000
+  max_duration_ms: 21600000          # 6h guard
+  min_height: 360
+  min_fps: 15
+
+audio:
+  asr_sample_rate: 16000
+  asr_channels: 1
+  master_sample_rate: 48000
+  loudness_target_lufs: -14
+  true_peak_dbtp: -1.0
+  highpass_hz: 80
+
+# Frame salience sampling — the mechanism that keeps vision cost O(1) in video length.
+# A frame only goes to a vision model if its composite salience clears min_salience.
+frame_salience:
+  sample_interval_ms: 1000
+  budget_frames: 48
+  vision_batch_size: 6
+  min_salience: 0.35
+  weights:
+    scene_boundary: 0.30
+    speaker_change: 0.20
+    speech_energy: 0.15
+    motion_magnitude: 0.15
+    candidate_boundary_proximity: 0.15
+    on_screen_text_probability: 0.05
+  nms_window_ms: 5000
+
+transcription:
+  provider: local                    # overridden by ASR_PROVIDER env
+  word_timestamps: true
+  vad_filter: true
+  vad_min_silence_ms: 350
+  beam_size: 5
+  condition_on_previous_text: false   # avoids hallucination loops on long silences
+  max_segment_ms: 30000
+  language_detection: true
+  # Do not "improve" meaning: corrections are stored as separate transcripts.
+  auto_correct_english_only: true
+  preserve_original: true
+
+diarization:
+  enabled: false                     # requires HF_TOKEN + accepted model terms
+  method: heuristic                  # pyannote | heuristic
+  min_segment_ms: 800
+  pause_threshold_ms: 650            # heuristic: speaker change when a pause exceeds this
+  max_speakers: 6
+
+scene_detection:
+  detector: content
+  threshold: 27.0
+  min_scene_len_ms: 500
+  blackdetect_pic_th: 0.98
+  blackdetect_min_dur_s: 0.5
+  freezedetect_noise_db: -60
+  freezedetect_min_dur_s: 1.0
+
+semantic_analysis:
+  chunk_seconds: 240
+  overlap_seconds: 20
+  max_chunks: 60                     # hard cap; longer sources get hierarchical summarisation
+  schema_version: 1
+  schema_repair_attempts: 1
+  require_quote_grounding: true       # every key_statement must match transcript text
+  temperature: 0.2
+
+moment_detection:
+  ideas_per_chunk: 4
+  min_ideas_per_chunk: 1
+  require_context_for_standalone: true
+  boundary_snap_tolerance_ms: 400
+  reject_if_cuts_word: true
+  rationale_required: true
+
+clip_generation:
+  variants_per_moment: 1             # raise deliberately; each variant is scored separately
+  variant_strategies: [quick_hook, full_context, story]
+  max_total_clips: 30
+  suppress_near_identical: true
+
+# Deterministic fallbacks used when AI_PROVIDER=none. The product must still work (with
+# clearly lower quality and an explicit "heuristic mode" banner) rather than failing.
+heuristic_fallback:
+  enabled: true
+  score_from: [speech_energy, pause_structure, question_marks, emphasis_words]
+  label: "heuristic (no AI provider configured)"

@@ -1,0 +1,51 @@
+# =====================================================================================
+# Pricing used to compute usage_records.cost_usd. Unit costs are USD.
+# Values are CONFIGURATION, not billing truth — verify against provider price sheets
+# before enabling spend reporting in production (marked TODO_VERIFY where volatile).
+# =====================================================================================
+version: "2026-01-v1"
+currency: USD
+
+llm:
+  openai:
+    gpt-4o-mini:   { input_per_1m_tokens: 0.15, output_per_1m_tokens: 0.60 }
+    gpt-4o:        { input_per_1m_tokens: 2.50, output_per_1m_tokens: 10.00 }
+  anthropic:
+    claude-3-5-haiku:  { input_per_1m_tokens: 0.80, output_per_1m_tokens: 4.00 }
+    claude-3-5-sonnet: { input_per_1m_tokens: 3.00, output_per_1m_tokens: 15.00 }
+
+stt:
+  local:        { per_audio_minute: 0.0 }        # electricity only; tracked as compute seconds
+  openai:       { per_audio_minute: 0.006 }      # TODO_VERIFY
+  deepgram:     { per_audio_minute: 0.0043 }     # TODO_VERIFY
+  assemblyai:   { per_audio_minute: 0.0062 }     # TODO_VERIFY
+
+vision:
+  per_frame_default: 0.00025                     # TODO_VERIFY; derived from model token cost
+  per_frame_by_model:
+    gpt-4o-mini: 0.00018
+
+render:
+  # Local compute: est. cost per rendered minute for accounting only (not billed to user).
+  cpu_per_minute: 0.004
+  gpu_per_minute: 0.020
+
+storage:
+  s3_per_gb_month: 0.015
+  r2_per_gb_month: 0.015
+  egress_per_gb: 0.0                             # R2 egress-free; S3 varies
+
+youtube:
+  # Quota is free but finite; track units so the scheduler can refuse rather than fail.
+  quota_units_per_day: 10000
+  units_videos_insert: 1600                      # TODO_VERIFY against live API docs
+  units_videos_list: 1
+  units_thumbnails_set: 50                       # TODO_VERIFY
+  units_analytics_query: 1
+  monetary_cost_per_unit: 0.0
+
+budget:
+  warn_at_fraction: 0.80
+  hard_stop_at_fraction: 1.00
+  # Per-project estimate shown before processing starts.
+  estimate_per_source_minute_usd: 0.012

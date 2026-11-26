@@ -1,0 +1,51 @@
+# --- secrets / local config ---
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+
+# --- python ---
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+*.egg-info/
+.mypy_cache/
+.ruff_cache/
+.pytest_cache/
+htmlcov/
+.coverage
+coverage.xml
+
+# --- node / next ---
+node_modules/
+.next/
+out/
+.turbo/
+*.tsbuildinfo
+npm-debug.log*
+
+# --- media / storage (never commit user media or derived assets) ---
+storage/*
+!storage/.gitkeep
+backend/tests/fixtures/generated/
+*.mp4
+*.mov
+*.mkv
+*.wav
+*.mp3
+*.ass
+*.vtt
+!backend/tests/fixtures/**/*.json
+
+# --- celery / runtime ---
+celerybeat-schedule*
+*.pid
+*.log
+
+# --- os / editors ---
+.DS_Store
+.idea/
+.vscode/
+*.swp

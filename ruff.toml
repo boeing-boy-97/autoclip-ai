@@ -1,0 +1,27 @@
+# Ruff config — shared by backend CI and local runs.
+line-length = 100
+target-version = "py312"
+
+[lint]
+select = ["E", "F", "W", "I", "N", "UP", "B", "S", "A", "C4", "DTZ", "T20", "PT", "RET",
+          "SIM", "TID", "ARG", "PL", "RUF", "BLE", "ANN", "ISC", "PTH", "TCH"]
+ignore = [
+  "ANN101", "ANN102",  # self/cls annotations
+  "ANN401",            # Any is appropriate at provider boundaries
+  "PLR0913",           # FastAPI handlers legitimately take many parameters
+  "PLR0915", "PLR0912",# long setup functions (app factory, health probes)
+  "B008",              # FastAPI's Depends()/Body() in defaults is the documented pattern
+  "S101",              # asserts are used for internal invariants, not user input
+  "TCH003",            # typing-only imports resolved at runtime by pydantic
+  "PLR2004",           # magic values are named in comments where relevant
+  "RUF001", "RUF002",  # en-dashes in prose/docstrings are intentional
+]
+
+[lint.per-file-ignores]
+"backend/tests/**" = ["S", "ANN", "PLR2004", "ARG", "T20",
+                       "PLC0415"]  # in-function imports keep env setup ordered before app import
+"backend/app/main.py" = ["ANN001"]  # dependency-probe helper takes Settings
+"ops/scripts/**" = ["T20", "S", "ANN"]
+
+[lint.isort]
+known-first-party = ["app"]

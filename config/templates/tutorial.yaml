@@ -1,0 +1,83 @@
+# =====================================================================================
+# Editing template: tutorial
+# Screen-share and demo friendly. Letterbox preserves the demo area.
+# Templates are DATA compiled into a RenderPlan. Structural guarantees (no pitch change,
+# no fabricated words, no cuts inside a word) are enforced by the renderer, not by config.
+# =====================================================================================
+key: tutorial
+label: Tutorial
+description: Screen-share and demo friendly. Letterbox preserves the demo area.
+
+canvas:
+  width: 1080
+  height: 1920
+  fps: 30
+  background: "#0F1115"
+  safe_margin_top_px: 160
+  safe_margin_bottom_px: 320
+  safe_margin_side_px: 64
+
+reframe:
+  strategy: letterbox                 # active_speaker | split_screen | letterbox
+  fallbacks: [subject_centroid, centered]
+  smoothing_ms: 400
+  min_dwell_ms: 1200
+  face_padding_ratio: 0.18
+  allow_dynamic_switch: false
+  cut_on_scene_boundary_only: true
+
+captions:
+  style_key: clean_lower
+  font_family: Inter
+  font_size_px: 54
+  font_weight: 800
+  max_words_per_cue: 7
+  max_lines: 2
+  position: bottom
+  outline_px: 6
+  shadow: true
+  highlight_keywords: true
+  keyword_color: "#FFD166"
+  text_color: "#FFFFFF"
+  box_opacity: 0.6
+  uppercase: false
+
+zoom:
+  enabled: false
+  style: subtle_emphasis
+  max_scale: 1.05
+  on: keyword_moments
+  transition_ms: 250
+
+silence:
+  trim: false
+  min_silence_ms: 450
+  keep_padding_ms: 120
+  never_cut_within_word: true
+
+audio:
+  loudnorm: true
+  denoise: true
+  music:
+    enabled: false
+    track: null
+    gain_db: -22
+    duck_under_speech_db: -8
+
+branding:
+  watermark:
+    enabled: true
+    asset: null
+    position: bottom_left
+    width_px: 160
+    opacity: 0.85
+  intro: { enabled: false, asset: null, max_duration_ms: 1200 }
+  outro: { enabled: false, asset: null, max_duration_ms: 1500 }
+
+transitions:
+  type: none
+  duration_ms: 200
+
+overlays:
+  progress_bar: false
+  subscribe_prompt: false

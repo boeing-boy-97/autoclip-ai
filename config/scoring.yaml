@@ -1,0 +1,82 @@
+# =====================================================================================
+# Clip opportunity scoring — configurable, versioned, decomposed.
+# Weights MUST sum to 1.0 (validated at load; a weights_version mismatch invalidates cache).
+# Changing weights creates a new `weights_version`; existing candidate_scores rows keep the
+# version that produced them so historical rankings stay explainable.
+# =====================================================================================
+version: "2026-01-v1"
+
+criteria:
+  hook:
+    weight: 0.15
+    description: Strength of the opening line as an independent attention grabber.
+  content_value:
+    weight: 0.15
+    description: Density of insight, information or entertainment payoff.
+  narrative:
+    weight: 0.15
+    description: Internal completeness — setup, development, resolution.
+  standalone:
+    weight: 0.15
+    description: Whether the clip is fully intelligible without the rest of the source.
+  audience:
+    weight: 0.10
+    description: Fit with the configured channel audience and language.
+  emotion:
+    weight: 0.10
+    description: Emotional or curiosity charge (not a virality prediction).
+  visual_quality:
+    weight: 0.05
+    description: Framing, sharpness, lighting, acceptable motion.
+  audio_quality:
+    weight: 0.05
+    description: Speech intelligibility, noise floor, no clipping.
+  ending_strength:
+    weight: 0.05
+    description: Does the clip land on a conclusion rather than trailing off.
+  clarity:
+    weight: 0.05
+    description: Absence of meandering, repetition and unresolved references.
+
+# How the ten criteria roll up into the four user-facing sub-scores.
+# Deliberately keeps technical quality separate from engagement potential.
+rollup:
+  content_potential:    [hook, content_value, narrative, emotion, clarity]
+  technical_quality:    [visual_quality, audio_quality]
+  context_completeness: [standalone, narrative, clarity]
+  audience_relevance:   [audience, content_value]
+
+# Auto-approval gates. A clip may only skip human review when ALL pass.
+# Default is conservative: human approval is the norm, as required by the product spec.
+auto_approve:
+  enabled: false
+  min_overall: 78
+  min_context_completeness: 70
+  require_qa_pass: true
+  disallow_flags: [misrepresentation_risk, sensitive_content_severe]
+
+# Diversity / duplicate suppression thresholds.
+diversity:
+  max_overlap_iou: 0.15
+  semantic_similarity_threshold: 0.88
+  max_clips_per_topic: 2
+  max_clips_per_speaker: 4
+  intentional_overlap_allowance: 1     # e.g. same moment as 15s + 45s, explicitly justified
+  min_gap_between_clips_ms: 3000
+
+# Duration handling. Presets are preferences, not clamps: a complete idea wins.
+duration:
+  hard_min_ms: 3000
+  hard_max_ms: 180000
+  snap_to_sentence_boundary: true
+  snap_tolerance_ms: 400
+  prefer_complete_idea: true
+  allow_overrun_beyond_max: false
+  dead_air_trim_threshold_ms: 400
+
+categories:
+  enabled: [hook, surprising_fact, educational, business_insight, motivational, funny,
+            emotional_story, debate, opinion, important_question, unexpected_answer,
+            tutorial, memorable_conclusion, reaction]
+  # Set to a subset to bias discovery; empty list = auto-select everything.
+  preferred: []

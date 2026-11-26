@@ -1,0 +1,83 @@
+# =====================================================================================
+# Editing template: motivational
+# Punchy delivery. Larger type, faster cuts at pauses.
+# Templates are DATA compiled into a RenderPlan. Structural guarantees (no pitch change,
+# no fabricated words, no cuts inside a word) are enforced by the renderer, not by config.
+# =====================================================================================
+key: motivational
+label: Motivational
+description: Punchy delivery. Larger type, faster cuts at pauses.
+
+canvas:
+  width: 1080
+  height: 1920
+  fps: 30
+  background: "#0F1115"
+  safe_margin_top_px: 160
+  safe_margin_bottom_px: 320
+  safe_margin_side_px: 64
+
+reframe:
+  strategy: active_speaker                 # active_speaker | split_screen | letterbox
+  fallbacks: [subject_centroid, centered]
+  smoothing_ms: 400
+  min_dwell_ms: 900
+  face_padding_ratio: 0.18
+  allow_dynamic_switch: true
+  cut_on_scene_boundary_only: true
+
+captions:
+  style_key: bold_center
+  font_family: Inter
+  font_size_px: 70
+  font_weight: 800
+  max_words_per_cue: 3
+  max_lines: 2
+  position: center_lower
+  outline_px: 6
+  shadow: true
+  highlight_keywords: true
+  keyword_color: "#FFD166"
+  text_color: "#FFFFFF"
+  box_opacity: 0.0
+  uppercase: true
+
+zoom:
+  enabled: true
+  style: subtle_emphasis
+  max_scale: 1.1
+  on: emphasis
+  transition_ms: 250
+
+silence:
+  trim: true
+  min_silence_ms: 300
+  keep_padding_ms: 80
+  never_cut_within_word: true
+
+audio:
+  loudnorm: true
+  denoise: false
+  music:
+    enabled: true
+    track: null
+    gain_db: -24
+    duck_under_speech_db: -10
+
+branding:
+  watermark:
+    enabled: true
+    asset: null
+    position: top_right
+    width_px: 160
+    opacity: 0.85
+  intro: { enabled: false, asset: null, max_duration_ms: 1200 }
+  outro: { enabled: false, asset: null, max_duration_ms: 1500 }
+
+transitions:
+  type: none
+  duration_ms: 200
+
+overlays:
+  progress_bar: false
+  subscribe_prompt: false
