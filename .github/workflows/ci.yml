@@ -97,7 +97,10 @@ jobs:
             exit 1
           fi
 
-          psql -d autoclip_test -f docs/database/verify_invariants.sql > /tmp/inv.log 2>/tmp/inv.err
+          # The script reports through RAISE NOTICE, which psql writes to *stderr* — merging the
+          # streams is what makes "PASS:" visible at all. (It used to be greped from stdout only,
+          # so this job could never pass.)
+          psql -d autoclip_test -f docs/database/verify_invariants.sql > /tmp/inv.log 2>&1
           inv_rc=$?
           grep -E 'PASS:|FAIL:' /tmp/inv.log
           echo "invariants: exit=$inv_rc pass=$(grep -c 'PASS:' /tmp/inv.log) fail=$(grep -c 'FAIL:' /tmp/inv.log)"
@@ -106,13 +109,12 @@ jobs:
             echo "::error title=schema invariants failed::$(grep -m1 'FAIL:' /tmp/inv.log | cut -c1-400)"
             exit 1
           fi
-          if grep -qE 'ERROR|FATAL' /tmp/inv.err; then
-            echo "::error title=verify_invariants.sql raised SQL errors::$(grep -m1 -E 'ERROR|FATAL' /tmp/inv.err | cut -c1-350)"
-            head -20 /tmp/inv.err
+          if grep -qE 'ERROR:|FATAL:' /tmp/inv.log; then
+            echo "::error title=verify_invariants.sql raised SQL errors::$(grep -m1 -E 'ERROR:|FATAL:' /tmp/inv.log | cut -c1-350)"
             exit 1
           fi
           if ! grep -q 'PASS:' /tmp/inv.log; then
-            echo "::error title=verify_invariants.sql asserted nothing::exit=$inv_rc stderr=$(head -2 /tmp/inv.err | tr '\n' ' ' | cut -c1-350)"
+            echo "::error title=verify_invariants.sql asserted nothing::exit=$inv_rc output=$(head -3 /tmp/inv.log | tr '\n' ' ' | cut -c1-350)"
             exit 1
           fi
       - name: Config file validity
