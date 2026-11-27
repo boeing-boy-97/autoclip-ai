@@ -10,6 +10,7 @@ Security behaviours implemented here (see docs/SECURITY.md §1):
 
 from __future__ import annotations
 
+import logging
 import re
 import uuid
 from dataclasses import dataclass
@@ -33,6 +34,8 @@ from app.db.repositories import (
     UserRepository,
     WorkspaceRepository,
 )
+
+logger = logging.getLogger(__name__)
 
 EMAIL_RE = re.compile(r"^[^@\s]+@[^@\s]+\.[A-Za-z]{2,}$")
 MIN_PASSWORD_LENGTH = 10
@@ -73,11 +76,12 @@ class LoginThrottle:
 
     Redis is the right home for this: it is shared across API replicas (in-process counters would
     let an attacker get N attempts per replica) and it expires automatically.
+
+    Every Redis call is wrapped: a cache outage must degrade to "unthrottled but working", never to
+    a 500 on the login endpoint. The degradation is logged so it is visible in operations.
     """
 
-    def __init__(
-        self, redis_client: Any, *, window: timedelta = LOCKOUT_WINDOW
-    ) -> None:
+    def __init__(self, redis_client: Any, *, window: timedelta = LOCKOUT_WINDOW) -> None:
         self.redis = redis_client
         self.window = window
 
@@ -86,20 +90,41 @@ class LoginThrottle:
         return f"login_fail:{email.lower()}:{ip or 'unknown'}"
 
     def check(self, email: str, ip: str | None) -> None:
-        raw = self.redis.get(self._key(email, ip))
-        count = int(raw or 0)
-        if count >= MAX_LOGIN_FAILURES:
-            ttl = self.redis.ttl(self._key(email, ip))
-            raise RateLimitError(max(int(ttl) if ttl and ttl > 0 else 60, 1))
+        key = self._key(email, ip)
+        try:
+            raw = self.redis.get(key)
+            count = int(raw or 0)
+            if count < MAX_LOGIN_FAILURES:
+                return
+            ttl = self.redis.ttl(key)
+        except Exception as exc:  # noqa: BLE001 - Redis failure must not block sign-in
+            logger.warning(
+                "login_throttle.unavailable",
+                extra={"operation": "check", "error": type(exc).__name__},
+            )
+            return
+        raise RateLimitError(max(int(ttl) if ttl and ttl > 0 else 60, 1))
 
     def record_failure(self, email: str, ip: str | None) -> None:
         key = self._key(email, ip)
-        count = self.redis.incr(key)
-        if count == 1:
-            self.redis.expire(key, int(self.window.total_seconds()))
+        try:
+            count = self.redis.incr(key)
+            if count == 1:
+                self.redis.expire(key, int(self.window.total_seconds()))
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "login_throttle.unavailable",
+                extra={"operation": "record_failure", "error": type(exc).__name__},
+            )
 
     def clear(self, email: str, ip: str | None) -> None:
-        self.redis.delete(self._key(email, ip))
+        try:
+            self.redis.delete(self._key(email, ip))
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "login_throttle.unavailable",
+                extra={"operation": "clear", "error": type(exc).__name__},
+            )
 
 
 class AuthService:
@@ -160,7 +185,7 @@ class AuthService:
             name=ws_name,
             slug=self._unique_slug(ws_name),
             owner_user_id=user.id,
-            default_language=(self.settings.public_api_url and "en") or "en",
+            default_language=self.settings.workspace_default_language,
         )
         self.audit.record(
             action="auth.register",
@@ -227,16 +252,12 @@ class AuthService:
         if self.throttle:
             self.throttle.clear(email, ip)
         self.users.record_login(user.id)
-        self.audit.record(
-            action="auth.login", actor_user_id=user.id, ip=ip, user_agent=user_agent
-        )
+        self.audit.record(action="auth.login", actor_user_id=user.id, ip=ip, user_agent=user_agent)
         self.db.flush()
         return self._issue_session(user, ip=ip, user_agent=user_agent)
 
     # ---------------------------------------------------------------- sessions
-    def _issue_session(
-        self, user: User, *, ip: str | None, user_agent: str | None
-    ) -> AuthResult:
+    def _issue_session(self, user: User, *, ip: str | None, user_agent: str | None) -> AuthResult:
         token = generate_token()
         csrf = generate_token(24)
         expires_at = datetime.now(UTC) + timedelta(hours=self.settings.session_ttl_hours)
@@ -290,9 +311,7 @@ class AuthService:
         )
         if row is not None and row.revoked_at is None:
             row.revoked_at = datetime.now(UTC)
-            self.audit.record(
-                action="auth.logout", actor_user_id=row.user_id, ip=ip
-            )
+            self.audit.record(action="auth.logout", actor_user_id=row.user_id, ip=ip)
             self.db.flush()
 
     def revoke_all_sessions(self, *, user_id: uuid.UUID) -> int:

@@ -98,14 +98,17 @@ Fixtures never include third-party copyrighted media.
 
 ## 6. CI (`/.github/workflows/ci.yml`)
 
-Stages: lint (`ruff format --check`, `ruff check`, `mypy app/`) → unit → integration (services:
-postgres, redis, minio) → schema verify → openapi validate (and drift vs app export) → frontend
-(`tsc --noEmit`, `eslint`, `vitest`, `next build`) → E2E on the composed stack → security
-(`bandit`, `pip-audit`, `npm audit --omit=dev`) → coverage gates.
+Stages (`.github/workflows/ci.yml`, as it runs today): lint (`ruff format --check`, `ruff check`,
+`mypy app/`, `bandit`, `docker compose config`) → contract & schema (`validate_openapi.py`,
+`schema.sql` + invariants, `phase0_verify.sh`, `verify_migrations.sh`) → unit → integration (services:
+postgres, redis) → frontend (`tsc --noEmit`, `next build`) → security (`pip-audit`, secret scan) →
+no-fake-logic scan.
 
-Coverage gates: **85 %** for `app/intelligence`, `app/production`, `app/qa`, `app/publishing`;
-**70 %** overall backend. Frontend: 60 % on `src/lib` (business logic), no gate on pure presentational
-components.
+Coverage is measured in the **integration** job over `tests/unit` + `tests/integration` together,
+because the routes, services and repositories are only exercised end to end — measured on the unit
+suite alone the number describes a different codebase. The current floor is 60 %; raise it as the
+gaps close. Frontend tests do not exist yet (see `CODE_REVIEW.md` item 21), so there is no frontend
+coverage gate to state.
 
 ## 7. What is explicitly NOT tested automatically
 

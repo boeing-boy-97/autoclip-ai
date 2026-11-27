@@ -24,6 +24,7 @@ from app.api.deps import (
     AuthContext,
     CSRFDep,
     DbDep,
+    Role,
     WorkspaceContext,
     current_auth,
     workspace_access,
@@ -47,7 +48,7 @@ router = APIRouter(prefix="/workspaces/{workspace_id}/projects", tags=["Projects
 
 
 # --------------------------------------------------------------------- dependencies
-def _ws_dep(min_role: str):  # noqa: ANN202 - returns a FastAPI dependency callable
+def _ws_dep(min_role: Role):  # noqa: ANN202 - returns a FastAPI dependency callable
     def _resolver(
         workspace_id: uuid.UUID,
         auth_ctx: Annotated[AuthContext, Depends(current_auth)],
@@ -142,9 +143,7 @@ def get_project(project_id: uuid.UUID, ctx: WorkspaceViewer, db: DbDep) -> Proje
     except (NotFoundError, ConflictError) as exc:
         raise _translate(exc) from exc
 
-    source = SourceRepository(db).for_project(
-        workspace_id=ctx.workspace.id, project_id=project_id
-    )
+    source = SourceRepository(db).for_project(workspace_id=ctx.workspace.id, project_id=project_id)
     return ProjectDetail.build(project, events, source)
 
 

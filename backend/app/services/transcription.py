@@ -123,13 +123,19 @@ def extract_asr_audio(
         ffmpeg_bin,
         "-nostdin",
         "-y",
-        "-v", "error",
-        "-i", str(source_path),
+        "-v",
+        "error",
+        "-i",
+        str(source_path),
         "-vn",
-        "-ac", "1",
-        "-ar", "16000",
-        "-c:a", "pcm_s16le",
-        "-af", f"loudnorm=I={target_lufs}:TP=-1.5:LRA=11",
+        "-ac",
+        "1",
+        "-ar",
+        "16000",
+        "-c:a",
+        "pcm_s16le",
+        "-af",
+        f"loudnorm=I={target_lufs}:TP=-1.5:LRA=11",
         str(out_path),
     ]
     try:
@@ -355,9 +361,7 @@ def transcribe(
             "implemented yet. Use ASR_PROVIDER=local, which runs a real local engine.",
         )
 
-    raise AsrUnavailableError(
-        "asr_provider_invalid", f"unknown ASR_PROVIDER '{provider}'"
-    )
+    raise AsrUnavailableError("asr_provider_invalid", f"unknown ASR_PROVIDER '{provider}'")
 
 
 def _clamp(value: int, low: int, high: int | None) -> int:

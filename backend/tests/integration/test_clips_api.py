@@ -4,6 +4,7 @@ Rendering is real: real FFmpeg, real libass, real source file. The assertions ch
 *bytes* where they can (dimensions via ffprobe, presence of an audio stream) rather than trusting
 the plan, because a plan that was honoured in name only is exactly the failure worth catching.
 """
+
 from __future__ import annotations
 
 import json
@@ -198,19 +199,25 @@ class TestRendering:
         from app.core.config import get_settings
 
         settings = get_settings()
-        stored = list(
-            Path(settings.local_storage_root).rglob("*.mp4")
-        )
+        stored = list(Path(settings.local_storage_root).rglob("*.mp4"))
         rendered = [p for p in stored if "clip_video" in str(p)]
         assert rendered, "the rendered file must exist in storage"
         newest = max(rendered, key=lambda p: p.stat().st_mtime)
 
         probe = subprocess.run(
             [
-                "ffprobe", "-v", "error", "-show_entries",
-                "stream=codec_type,width,height", "-of", "json", str(newest),
+                "ffprobe",
+                "-v",
+                "error",
+                "-show_entries",
+                "stream=codec_type,width,height",
+                "-of",
+                "json",
+                str(newest),
             ],
-            capture_output=True, text=True, check=False,
+            capture_output=True,
+            text=True,
+            check=False,
         )
         streams = json.loads(probe.stdout)["streams"]
         video = next(s for s in streams if s["codec_type"] == "video")
@@ -314,8 +321,7 @@ class TestRejectAndRestore:
         url = f"/api/v1/workspaces/{alice.workspace_id}/clips/{clip['id']}/reject"
         assert alice.client.post(url, json={}, headers=alice.headers).status_code == 422
         assert (
-            alice.client.post(url, json={"reason": "   "}, headers=alice.headers).status_code
-            == 422
+            alice.client.post(url, json={"reason": "   "}, headers=alice.headers).status_code == 422
         )
 
     def test_rejection_is_recorded_and_unpublishes(self, alice: Actor, ready_project: str):
@@ -382,9 +388,7 @@ class TestRejectAndRestore:
         versions = alice.client.get(f"{base}/versions", headers=alice.headers).json()
         first = next(v for v in versions if v["version_no"] == 1)
 
-        resp = alice.client.post(
-            f"{base}/versions/{first['id']}/restore", headers=alice.headers
-        )
+        resp = alice.client.post(f"{base}/versions/{first['id']}/restore", headers=alice.headers)
         assert resp.status_code == 200, resp.text
         assert resp.json()["clip"]["current_version_id"] == first["id"]
         assert resp.json()["previous_version_id"] is not None
@@ -514,21 +518,33 @@ class TestClipAuthorization:
         generate(alice, ready_project)
         clip = list_clips(alice, ready_project)[0]
 
-        assert bob.client.get(
-            f"/api/v1/workspaces/{alice.workspace_id}/clips/{clip['id']}", headers=bob.headers
-        ).status_code == 404
-        assert bob.client.get(
-            f"/api/v1/workspaces/{alice.workspace_id}/projects/{ready_project}/clips",
-            headers=bob.headers,
-        ).status_code == 404
-        assert bob.client.post(
-            f"/api/v1/workspaces/{alice.workspace_id}/clips/{clip['id']}/render",
-            headers=bob.headers,
-        ).status_code == 404
-        assert bob.client.get(
-            f"/api/v1/workspaces/{alice.workspace_id}/clips/{clip['id']}/captions",
-            headers=bob.headers,
-        ).status_code == 404
+        assert (
+            bob.client.get(
+                f"/api/v1/workspaces/{alice.workspace_id}/clips/{clip['id']}", headers=bob.headers
+            ).status_code
+            == 404
+        )
+        assert (
+            bob.client.get(
+                f"/api/v1/workspaces/{alice.workspace_id}/projects/{ready_project}/clips",
+                headers=bob.headers,
+            ).status_code
+            == 404
+        )
+        assert (
+            bob.client.post(
+                f"/api/v1/workspaces/{alice.workspace_id}/clips/{clip['id']}/render",
+                headers=bob.headers,
+            ).status_code
+            == 404
+        )
+        assert (
+            bob.client.get(
+                f"/api/v1/workspaces/{alice.workspace_id}/clips/{clip['id']}/captions",
+                headers=bob.headers,
+            ).status_code
+            == 404
+        )
 
     def test_anonymous_is_rejected(self, alice: Actor, ready_project: str):
         generate(alice, ready_project)

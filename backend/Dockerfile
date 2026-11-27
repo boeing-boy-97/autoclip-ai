@@ -35,8 +35,11 @@ RUN mkdir -p /tmp/autoclip /app/storage && \
 USER appuser
 
 EXPOSE 8000
+# Readiness, not liveness: a container that answers HTTP but cannot reach PostgreSQL, Redis or
+# FFmpeg is not healthy. Worker containers disable this check in docker-compose.yml — they serve
+# no HTTP, so an HTTP probe there would report a running worker as unhealthy.
 HEALTHCHECK --interval=30s --timeout=5s --start-period=40s --retries=3 \
-  CMD curl -fsS http://localhost:8000/api/v1/health/livez || exit 1
+  CMD curl -fsS http://localhost:8000/api/v1/health/readyz || exit 1
 
 ENTRYPOINT ["/usr/bin/tini", "--"]
 CMD ["gunicorn", "app.main:app", \

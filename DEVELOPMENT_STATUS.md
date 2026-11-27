@@ -14,6 +14,63 @@ Phase 0 — Architecture and project foundation — **COMPLETE**
 
 ---
 
+## 0. Backend hardening pass (2026-11-27)
+
+A review pass found the stack as committed could not run in containers and had three security
+defects. All of the following are fixed on this branch, each with a regression test in
+`backend/tests/unit/test_hardening.py`:
+
+**Blocking**
+1. `docker-compose.yml` started Celery with `-A app.workers.celery_app`; the package is `app.worker`.
+   Every worker and beat crashed on start. Fixed, plus a CI step and a test that compare the compose
+   file against the Celery app.
+2. `frontend/Dockerfile` could not build: `output: "standalone"` was missing, `public/` did not exist,
+   and the builder reused a `--omit=dev` install that lacks TypeScript. All three fixed.
+3. `SCORING_CONFIG_PATH` was `../config/scoring.yaml` (cwd-relative) and resolved to `/config/...`
+   inside the image, so `/analysis/plan` and every `analysis.run` returned 500. Now resolved against
+   the repository root first (`Settings.scoring_config_file`).
+4. `beat` ran with no schedule, so `analysis.sweep_stuck` never executed. `beat_schedule` added.
+5. Seven queues were declared and only two routed; five workers could never receive work. Compose now
+   runs exactly the queues that have tasks (`media`, `transcribe`, `analyze`) and
+   `JobRepository.queue_for()` clamps anything else.
+
+**Security**
+6. Upload was gated on `_ws_dep("member")` — not a role, ranking 0 — so a **viewer** could upload.
+   Now `editor`, and `min_role` is a `Literal`, so the mistake cannot recur.
+7. CSRF could be skipped by adding any `Authorization: Bearer …` header to a cookie-authenticated
+   request. The check now follows the credential that actually authenticated the request.
+8. Rate limits were configured but never enforced. `app/core/ratelimit.py` (Redis fixed window,
+   fail-open) now backs per-user limits on upload/analysis/render and per-IP limits on login/register;
+   `LoginThrottle` no longer turns a Redis outage into a 500.
+9. `SecretBox` could not rotate its key (it rejected any other `key_version`). It now holds a
+   keyring: `SECRET_ENCRYPTION_KEY_VERSION` + `SECRET_ENCRYPTION_PREVIOUS_KEYS`.
+10. `JobRepository.find_succeeded` was the only query without a `workspace_id` filter; the
+    idempotency probe now requires it.
+
+**Reliability**
+11. `/health/livez` was used as the container healthcheck — always 200. Docker/compose now probe
+    `/health/readyz`, which requires the database, Redis, storage **and FFmpeg**.
+12. The readiness probe called blocking drivers from `async def` (event loop stall), `mkdir`-ed the
+    storage root on every call, and leaked a Redis client. It is now sync (threadpool), side-effect
+    free and closes what it opens.
+13. Upload was `async def` around blocking spooling/FFprobe/S3 code; it is now a sync handler, and it
+    spools to `TMP_ROOT` instead of the container's ephemeral `/tmp`.
+14. `/health` no longer publishes `environment` + the integration inventory in production.
+15. Real slow-query logging (`DB_SLOW_QUERY_MS`) replaces a listener that only ran under DEBUG.
+
+**Developer experience**
+16. `./ops/scripts/dev_env.sh` generates a working `.env` — `cp .env.example .env` always failed,
+    because placeholder secrets are rejected at boot in every environment.
+17. CI: coverage now measured over unit **and** integration suites (it was measured on unit tests
+    only, where the routes and repositories have no coverage); `make_fixtures.sh || echo` and
+    `pip-audit || true` no longer mask failures; `verify_migrations.sh` runs; ruff is pinned.
+
+Verification in this environment: `ruff check` clean, `ruff format --check` clean over
+`backend/app` + `backend/tests`, `pytest tests/unit` green (200 tests). The integration suite needs
+PostgreSQL + Redis and was not run here — it is exercised by CI's `test-integration` job.
+
+---
+
 ## 1. Phase 0 deliverables — status
 
 | Deliverable | Status | Artifact |

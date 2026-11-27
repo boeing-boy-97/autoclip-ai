@@ -14,6 +14,7 @@ Design rules that everything here follows:
 4. **Never leave a job RUNNING forever.** Every exit path marks the job; a sweeper reclaims jobs
    whose worker was killed outright and therefore never got to run its exit path.
 """
+
 from __future__ import annotations
 
 import logging
@@ -151,9 +152,10 @@ def sweep_stuck_jobs() -> dict:
         for job in rows:
             job.status = "DEAD_LETTER"
             job.error_code = "worker_lost"
+            last_seen = job.heartbeat_at.isoformat() if job.heartbeat_at else "never"
             job.error_detail = (
-                f"no heartbeat since {job.heartbeat_at.isoformat()}; the worker was most likely "
-                "killed. Retry the job to continue."
+                f"no heartbeat since {last_seen}; the worker was most likely killed. "
+                "Retry the job to continue."
             )
             job.finished_at = datetime.now(UTC)
             reclaimed.append(str(job.id))

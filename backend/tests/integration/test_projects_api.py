@@ -42,9 +42,7 @@ class TestProjectCrud:
 
     def test_filter_by_status(self, alice: Actor):
         alice.create_project(name="A")
-        resp = alice.client.get(
-            f"/api/v1/workspaces/{alice.workspace_id}/projects?status=CREATED"
-        )
+        resp = alice.client.get(f"/api/v1/workspaces/{alice.workspace_id}/projects?status=CREATED")
         assert len(resp.json()["items"]) == 1
         empty = alice.client.get(
             f"/api/v1/workspaces/{alice.workspace_id}/projects?status=PUBLISHED"

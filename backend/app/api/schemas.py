@@ -102,11 +102,7 @@ class SourceOut(ORMModel):
     def from_model(cls, source) -> SourceOut:  # noqa: ANN001
         return cls.model_validate(
             {
-                **{
-                    k: getattr(source, k)
-                    for k in cls.model_fields
-                    if k not in {"sha256", "probe"}
-                },
+                **{k: getattr(source, k) for k in cls.model_fields if k not in {"sha256", "probe"}},
                 "sha256": source.sha256.hex() if source.sha256 else None,
                 "probe": source.probe_json,
             }
@@ -187,11 +183,7 @@ class _ProjectOutWithSource(_ProjectOutBase):
     @classmethod
     def from_model(cls, project) -> ProjectOut:  # noqa: ANN001
         from_orm = super().model_validate
-        payload = {
-            name: getattr(project, name)
-            for name in cls.model_fields
-            if name != "source"
-        }
+        payload = {name: getattr(project, name) for name in cls.model_fields if name != "source"}
         source = getattr(project, "source", None)
         payload["source"] = SourceOut.from_model(source) if source is not None else None
         return from_orm(payload)
@@ -207,7 +199,10 @@ class ProjectDetail(ProjectOut):
 
     @classmethod
     def build(
-        cls, project, events, source=None  # noqa: ANN001
+        cls,
+        project,  # noqa: ANN001 - ORM row; importing it here would be circular
+        events,  # noqa: ANN001
+        source=None,  # noqa: ANN001
     ) -> ProjectDetail:
         """Assemble from ORM objects.
 
@@ -415,10 +410,7 @@ class MomentOut(BaseModel):
             standalone_ok=moment.standalone_ok,
             selected=moment.selected,
             suppressed_reason=moment.suppressed_reason,
-            score=
-            CandidateScoreOut.model_validate(score)
-            if score is not None
-            else None,
+            score=CandidateScoreOut.model_validate(score) if score is not None else None,
         )
 
 
@@ -505,8 +497,11 @@ class ClipOut(ORMModel):
     publishable: bool
     candidate_moment_id: uuid.UUID | None = None
     current_version_id: uuid.UUID | None = None
-    metadata: dict = Field(default_factory=dict, validation_alias=AliasChoices("meta", "metadata"),
-                           serialization_alias="metadata")
+    metadata: dict = Field(
+        default_factory=dict,
+        validation_alias=AliasChoices("meta", "metadata"),
+        serialization_alias="metadata",
+    )
     rejection_reason: str | None = None
     created_at: datetime | None = None
 

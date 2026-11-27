@@ -12,7 +12,9 @@ library. Both are intentional and ignored at file level below.
 
 from __future__ import annotations
 
-# ruff: noqa: PLW0603, PLC0415, ARG001, ANN202
+# ruff: noqa: PLW0603, ARG001, ANN202
+import logging
+import time
 from collections.abc import Iterator
 from contextlib import contextmanager
 
@@ -21,6 +23,8 @@ from sqlalchemy.engine import Engine
 from sqlalchemy.orm import Session, sessionmaker
 
 from app.core.config import Settings, get_settings
+
+logger = logging.getLogger(__name__)
 
 _engine: Engine | None = None
 _session_factory: sessionmaker[Session] | None = None
@@ -47,15 +51,30 @@ def _build_engine(settings: Settings) -> Engine:
         ),
     )
 
-    # Tests fail loudly if a workspace filter is forgotten: an unfiltered query inside a
-    # workspace context is a security bug, not a performance problem.
     @event.listens_for(engine, "before_cursor_execute")
-    def _log_slow_query(
-conn, cursor, statement, parameters, context, executemany):  # noqa: ANN001
-        if settings.log_level == "DEBUG":  # pragma: no cover - diagnostic only
-            import time
+    def _start_timer(conn, cursor, statement, parameters, context, executemany):  # noqa: ANN001
+        context._query_start = time.perf_counter()
 
-            context._query_start = time.perf_counter()
+    @event.listens_for(engine, "after_cursor_execute")
+    def _log_slow_query(conn, cursor, statement, parameters, context, executemany):  # noqa: ANN001
+        """Log statements over `DB_SLOW_QUERY_MS`.
+
+        Statement text only — never the bound parameters, which can contain password hashes,
+        session digests and user data.
+        """
+        started = getattr(context, "_query_start", None)
+        if started is None:
+            return
+        elapsed_ms = (time.perf_counter() - started) * 1000
+        if elapsed_ms < settings.db_slow_query_ms:
+            return
+        logger.warning(
+            "db.slow_query",
+            extra={
+                "duration_ms": round(elapsed_ms, 1),
+                "statement": " ".join(statement.split())[:400],
+            },
+        )
 
     return engine
 

@@ -1,12 +1,20 @@
 # syntax=docker/dockerfile:1.7
 # =====================================================================================
-# Frontend image: Next.js standalone. Built separately and deployed separately from the API.
+# Frontend image: Next.js standalone output, built separately from the API.
+#
+# Three things make this image work and are easy to break:
+#   1. `output: "standalone"` in next.config.mjs — without it there is no .next/standalone
+#      directory to copy and the runner stage has nothing to start.
+#   2. `npm ci` (dev dependencies included) in the builder — `next build` needs `typescript`
+#      and `@types/*`, which are devDependencies.
+#   3. public/ must exist in the build context. It is committed with a .gitkeep.
 # =====================================================================================
 FROM node:20-alpine AS deps
 WORKDIR /app
 RUN apk add --no-cache libc6-compat
 COPY frontend/package.json frontend/package-lock.json* ./
-RUN npm ci --omit=dev --no-audit --no-fund || npm install --omit=dev --no-audit --no-fund
+# Full install: the builder needs typescript and type packages to compile the app.
+RUN npm ci --no-audit --no-fund
 
 FROM node:20-alpine AS builder
 WORKDIR /app

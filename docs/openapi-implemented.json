@@ -2409,9 +2409,9 @@
     }
   },
   "info": {
-    "description": "AI video clipping and YouTube publishing platform. Phase 0: infrastructure and health. Domain endpoints are specified in docs/openapi.json and land in Phases 1-6.",
+    "description": "AI video clipping platform: authentication, projects, source ingestion, transcript analysis, clip generation and 9:16 rendering. Publishing is not implemented; endpoints that are specified but unbuilt are documented as such in docs/openapi.json.",
     "title": "AutoClipper AI API",
-    "version": "0.1.0-phase0"
+    "version": "0.1.0"
   },
   "openapi": "3.1.0",
   "paths": {
@@ -2641,6 +2641,7 @@
     },
     "/api/v1/health": {
       "get": {
+        "description": "Readiness plus the integration inventory.\n\nThe inventory says which third-party providers are configured, which is useful in\ndevelopment and is free reconnaissance in production \u2014 so it is omitted when\n`ENVIRONMENT=production`.",
         "operationId": "health_api_v1_health_get",
         "responses": {
           "200": {
@@ -2652,7 +2653,7 @@
             "description": "Successful Response"
           }
         },
-        "summary": "Full health and integration report",
+        "summary": "Health and integration report",
         "tags": [
           "System"
         ]
@@ -2686,7 +2687,7 @@
     },
     "/api/v1/health/readyz": {
       "get": {
-        "description": "Dependencies are reachable. Returns 503 when a required dependency is down.",
+        "description": "Every *required* dependency answers. Returns 503 otherwise.\n\nFFmpeg is in the required set: without it uploads, analysis and rendering all fail, so a\ndeployment that cannot render must not be routed traffic.",
         "operationId": "readyz_api_v1_health_readyz_get",
         "responses": {
           "200": {
@@ -5232,7 +5233,7 @@
         ]
       },
       "post": {
-        "description": "Upload a source video.\n\nOrder of checks: CSRF \u2192 workspace membership \u2192 rights declaration \u2192 extension/MIME/magic\nbytes \u2192 real `ffprobe` inspection. The file is spooled to a temp file (bounded by\n`MAX_UPLOAD_MB`), validated, then streamed into storage, so memory use stays constant.\nOn any rejection the stored object is removed \u2014 no orphaned bytes, no half-ingested project.",
+        "description": "Upload a source video.\n\nDeclared `def`, not `async def`, on purpose: spooling, `ffprobe` and the object-store upload are\nall blocking calls. As a sync handler FastAPI runs it in the threadpool, so one large upload\ncannot stall every other request on the worker's event loop.\n\nOrder of checks: CSRF \u2192 rate limit \u2192 workspace membership \u2192 rights declaration \u2192\nextension/MIME/magic bytes \u2192 real `ffprobe` inspection. The file is spooled to a temp file on\nthe configured scratch volume (bounded by `MAX_UPLOAD_MB`), validated, then streamed into\nstorage, so memory use stays constant. On any rejection the stored object is removed \u2014 no\norphaned bytes, no half-ingested project.",
         "operationId": "upload_source_api_v1_workspaces__workspace_id__projects__project_id__sources_post",
         "parameters": [
           {

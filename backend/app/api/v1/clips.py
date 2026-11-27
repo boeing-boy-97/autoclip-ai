@@ -4,6 +4,7 @@ The route shapes follow the designed contract in `docs/openapi.json` — project
 generation and listing, and bare `/clips/{clip_id}` for a single clip. Workspace ownership is
 resolved from the clip row itself, so a clip id alone is never enough to read someone else's work.
 """
+
 from __future__ import annotations
 
 import uuid
@@ -16,6 +17,8 @@ from app.api.deps import (
     ApiError,
     AuthDep,
     DbDep,
+    Role,
+    UserRateLimit,
     WorkspaceContext,
     require_csrf,
     workspace_access,
@@ -50,7 +53,7 @@ from app.services.storage import get_storage
 router = APIRouter(tags=["Clips"])
 
 
-def _ws_dep(min_role: str):  # noqa: ANN202 - returns a FastAPI dependency callable
+def _ws_dep(min_role: Role):  # noqa: ANN202 - returns a FastAPI dependency callable
     def dependency(
         workspace_id: uuid.UUID,
         auth_ctx: AuthDep,
@@ -63,6 +66,11 @@ def _ws_dep(min_role: str):  # noqa: ANN202 - returns a FastAPI dependency calla
 
 WorkspaceViewer = Annotated[WorkspaceContext, Depends(_ws_dep("viewer"))]
 WorkspaceEditor = Annotated[WorkspaceContext, Depends(_ws_dep("editor"))]
+
+# A render pins a CPU for minutes; the queue is per user, not per clip.
+_RENDER_RATE_LIMIT = UserRateLimit(
+    "clip_render", limit_setting="rate_limit_render_per_minute", window_seconds=60
+)
 
 
 def _service(db) -> ClipService:  # noqa: ANN001
@@ -173,7 +181,7 @@ def get_clip(
     response_model=ClipRenderOut,
     status_code=status.HTTP_201_CREATED,
     summary="Render Clip",
-    dependencies=[Depends(require_csrf)],
+    dependencies=[Depends(require_csrf), Depends(_RENDER_RATE_LIMIT)],
 )
 def render_clip(
     workspace_id: uuid.UUID,
@@ -247,9 +255,7 @@ def get_render_plan(
     """
     clip = _clip(db, workspace_id, clip_id)
     if clip.current_version_id is None:
-        raise ApiError(
-            "clip_not_rendered", "this clip has not been rendered yet", status_code=409
-        )
+        raise ApiError("clip_not_rendered", "this clip has not been rendered yet", status_code=409)
     version = db.get(ClipVersion, clip.current_version_id)
     if version is None:
         raise ApiError("clip_not_rendered", "the current version is missing", status_code=409)
@@ -349,11 +355,9 @@ def download_clip(
     if clip.current_version_id is None:
         raise ApiError("clip_not_rendered", "this clip has not been rendered yet", status_code=409)
     version = db.get(ClipVersion, clip.current_version_id)
-    asset = (
-        db.get(MediaAsset, version.video_asset_id)
-        if version and version.video_asset_id
-        else None
-    )
+    if version is None:
+        raise ApiError("clip_not_rendered", "the rendered version is missing", status_code=409)
+    asset = db.get(MediaAsset, version.video_asset_id) if version.video_asset_id else None
     if asset is None:
         raise ApiError("clip_not_rendered", "the rendered file is missing", status_code=409)
     return {

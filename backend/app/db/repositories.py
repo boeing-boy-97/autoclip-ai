@@ -14,6 +14,7 @@ from __future__ import annotations
 import base64
 import binascii
 import uuid
+from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any, ClassVar
@@ -86,9 +87,7 @@ class UserRepository:
         return self.db.get(User, user_id)
 
     def create(self, *, email: str, password_hash: str, display_name: str) -> User:
-        user = User(
-            email=email.lower(), password_hash=password_hash, display_name=display_name
-        )
+        user = User(email=email.lower(), password_hash=password_hash, display_name=display_name)
         self.db.add(user)
         self.db.flush()
         return user
@@ -301,7 +300,7 @@ class ProjectRepository:
 
     def stage_events(
         self, *, workspace_id: uuid.UUID, project_id: uuid.UUID
-    ) -> list[ProjectStageEvent]:
+    ) -> Sequence[ProjectStageEvent]:
         project = self.get(workspace_id=workspace_id, project_id=project_id)
         return list(
             self.db.scalars(
@@ -459,6 +458,11 @@ _RETRYABLE_JOB_STATUSES = frozenset({"FAILED", "DEAD_LETTER", "CANCELLED"})
 
 
 class JobRepository:
+    # Queues that actually have a worker consuming them (`docker-compose.yml`,
+    # `app.worker.celery_app`). A stage mapped to anything else would park its job in a queue
+    # nobody reads, so unknown/not-yet-implemented stages fall back to `DEFAULT_QUEUE`.
+    ACTIVE_QUEUES: ClassVar[frozenset[str]] = frozenset({"media", "transcribe", "analyze"})
+    DEFAULT_QUEUE: ClassVar[str] = "media"
     QUEUE_FOR_STAGE: ClassVar[dict[str, str]] = {
         "source_validation": "media",
         "ingest": "media",
@@ -468,11 +472,13 @@ class JobRepository:
         "visual_analysis": "analyze",
         "semantic_analysis": "analyze",
         "moment_detection": "analyze",
-        "render": "render",
-        "quality_check": "qa",
-        "publish": "publish",
-        "analytics": "analytics",
     }
+
+    @classmethod
+    def queue_for(cls, stage: str) -> str:
+        """The queue a stage's work belongs on — always one a worker is listening to."""
+        queue = cls.QUEUE_FOR_STAGE.get(stage, cls.DEFAULT_QUEUE)
+        return queue if queue in cls.ACTIVE_QUEUES else cls.DEFAULT_QUEUE
 
     def __init__(self, db: Session) -> None:
         self.db = db
@@ -505,7 +511,7 @@ class JobRepository:
             project_id=project_id,
             clip_id=clip_id,
             stage=stage,
-            queue=self.QUEUE_FOR_STAGE.get(stage, "media"),
+            queue=self.queue_for(stage),
             task_name=task_name,
             input_fingerprint=input_fingerprint,
             timeout_seconds=timeout_seconds,
@@ -525,19 +531,25 @@ class JobRepository:
             raise NotFoundError("job", job_id)
         return job
 
-    def list(
-        self, *, workspace_id: uuid.UUID, status: str | None = None, limit: int = 20
-    ) -> Page:
+    def list(self, *, workspace_id: uuid.UUID, status: str | None = None, limit: int = 20) -> Page:
         stmt = select(ProcessingJob).where(ProcessingJob.workspace_id == workspace_id)
         if status:
             stmt = stmt.where(ProcessingJob.status == status)
         rows = list(self.db.scalars(stmt.order_by(ProcessingJob.created_at.desc()).limit(limit)))
         return Page(items=rows)
 
-    def find_succeeded(self, *, input_fingerprint: str) -> ProcessingJob | None:
-        """Idempotency probe: has work with this exact fingerprint already completed?"""
+    def find_succeeded(
+        self, *, workspace_id: uuid.UUID, input_fingerprint: str
+    ) -> ProcessingJob | None:
+        """Idempotency probe: has *this workspace's* identical work already completed?
+
+        `workspace_id` is mandatory. Fingerprints are content-derived, so two tenants that upload
+        the same video share one; without the filter one tenant's success would satisfy another
+        tenant's idempotency gate.
+        """
         return self.db.scalar(
             select(ProcessingJob).where(
+                ProcessingJob.workspace_id == workspace_id,
                 ProcessingJob.input_fingerprint == input_fingerprint,
                 ProcessingJob.status == "SUCCEEDED",
             )
@@ -688,9 +700,7 @@ class ClipRepository:
         workspace — so a version id from another tenant is a 404, not a 403."""
         clip = self.get(workspace_id=workspace_id, clip_id=clip_id)
         version = self.db.scalar(
-            select(ClipVersion).where(
-                ClipVersion.id == version_id, ClipVersion.clip_id == clip.id
-            )
+            select(ClipVersion).where(ClipVersion.id == version_id, ClipVersion.clip_id == clip.id)
         )
         if version is None:
             raise NotFoundError("clip_version", version_id)
@@ -730,9 +740,7 @@ class ClipRepository:
             stmt = stmt.where(Clip.state == state)
         if cursor:
             stmt = stmt.where(Clip.created_at > _decode_cursor(cursor))
-        rows = list(
-            self.db.scalars(stmt.order_by(Clip.created_at.asc()).limit(limit + 1))
-        )
+        rows = list(self.db.scalars(stmt.order_by(Clip.created_at.asc()).limit(limit + 1)))
         next_cursor = None
         if len(rows) > limit:
             rows = rows[:limit]

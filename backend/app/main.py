@@ -1,15 +1,24 @@
-"""FastAPI application factory — Phase 0 infrastructure only.
+"""FastAPI application factory.
 
 Implemented here: settings fail-fast, structured logging, RFC 9457 problem+json errors,
-dependency-aware health/integration reporting, CORS.
-Not implemented here (Phase 1+): auth, projects, uploads, analysis, clips, publishing.
-Routes for those are specified in docs/openapi.json and deliberately return 501 until built,
-so the contract is explicit rather than silently absent.
+dependency-aware health/readiness reporting, CORS, trusted-host enforcement, security headers,
+and the API v1 routers (auth, projects, sources, analysis, jobs, clips, dashboard).
+
+Health has three levels and they mean different things:
+
+* `/health/livez` — the process is up. Never touches a dependency, so it must not be used as a
+  readiness signal (a container with a dead database is still "live").
+* `/health/readyz` — every *required* dependency answered, FFmpeg included. This is what container
+  health checks and load balancers should poll.
+* `/health` — the same probe plus the integration inventory, which is development/diagnostic
+  output and is therefore omitted in production.
 """
 
 from __future__ import annotations
 
+import contextlib
 import os
+import re
 import shutil
 import uuid
 from collections.abc import AsyncIterator
@@ -18,11 +27,12 @@ from pathlib import Path
 from typing import Any
 
 import psycopg
-import redis.asyncio as aioredis
+import redis
 import structlog
 from fastapi import FastAPI, Request, status
 from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.middleware.trustedhost import TrustedHostMiddleware
 from fastapi.responses import JSONResponse
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
@@ -31,6 +41,10 @@ from app.core.config import get_settings
 from app.core.logging import configure_logging, get_logger
 
 PROBLEM_CT = "application/problem+json"
+
+# Dependencies without which the product cannot do its job. FFmpeg belongs here: a deployment
+# that cannot probe or render would accept uploads and fail them all.
+REQUIRED_DEPENDENCIES = ("database", "redis", "storage", "ffmpeg")
 
 
 def problem(
@@ -76,20 +90,37 @@ async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
     log.info("app.stopped")
 
 
+_UUID_IN_PATH = re.compile(
+    r"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}"
+)
+
+
+def _redact_path(path: str) -> str:
+    """Replace path identifiers with `{id}` so logs carry the route, not the tenant's ids."""
+    return _UUID_IN_PATH.sub("{id}", path)
+
+
 def create_app() -> FastAPI:
     s = get_settings()
     app = FastAPI(
         title="AutoClipper AI API",
-        version=f"{__version__}-phase0",
+        version=__version__,
         description=(
-            "AI video clipping and YouTube publishing platform. Phase 0: infrastructure "
-            "and health. "
-            "Domain endpoints are specified in docs/openapi.json and land in Phases 1-6."
+            "AI video clipping platform: authentication, projects, source ingestion, "
+            "transcript analysis, clip generation and 9:16 rendering. Publishing is not "
+            "implemented; endpoints that are specified but unbuilt are documented as such in "
+            "docs/openapi.json."
         ),
         lifespan=lifespan,
-        docs_url="/docs",
-        openapi_url="/openapi.json",
+        docs_url="/docs" if s.docs_enabled else None,
+        redoc_url="/redoc" if s.docs_enabled else None,
+        openapi_url="/openapi.json" if s.docs_enabled else None,
     )
+
+    if s.trusted_host_list != ["*"]:
+        # Only enforced when configured: the default keeps local dev and TestClient working,
+        # while a deployment that sets TRUSTED_HOSTS gets Host-header validation.
+        app.add_middleware(TrustedHostMiddleware, allowed_hosts=s.trusted_host_list)
 
     app.add_middleware(
         CORSMiddleware,
@@ -97,16 +128,30 @@ def create_app() -> FastAPI:
         allow_credentials=True,
         allow_methods=["GET", "POST", "PATCH", "PUT", "DELETE", "OPTIONS"],
         allow_headers=["Authorization", "Content-Type", "Idempotency-Key", "X-CSRF-Token"],
-        expose_headers=["X-Trace-Id"],
+        expose_headers=["X-Trace-Id", "X-RateLimit-Limit", "X-RateLimit-Remaining", "Retry-After"],
     )
+
+    @app.middleware("http")
+    async def security_headers(request: Request, call_next: Any) -> Any:
+        """Cheap, unconditional hardening. None of these change API behaviour."""
+        response = await call_next(request)
+        response.headers.setdefault("X-Content-Type-Options", "nosniff")
+        response.headers.setdefault("X-Frame-Options", "DENY")
+        response.headers.setdefault("Referrer-Policy", "no-referrer")
+        response.headers.setdefault("Cross-Origin-Opener-Policy", "same-origin")
+        if s.session_cookie_secure:
+            # Only advertise HSTS where the deployment is actually TLS-terminated.
+            response.headers.setdefault(
+                "Strict-Transport-Security", "max-age=31536000; includeSubDomains"
+            )
+        return response
 
     @app.middleware("http")
     async def trace_and_log(request: Request, call_next: Any) -> Any:
         trace_id = request.headers.get("X-Trace-Id") or uuid.uuid4().hex
-        # Route template, not raw path, to avoid leaking identifiers into logs.
-        route = request.url.path
-        # Expose the trace id to exception handlers via request.state as well as the header,
-        # so client-supplied ids are not required for correlation.
+        # Identifiers are redacted before anything is logged or bound into the log context: a
+        # project or clip id in a log line is a tenant-scoped identifier, not a route.
+        route = _redact_path(request.url.path)
         request.state.trace_id = trace_id
         with structlog.contextvars.bound_contextvars(trace_id=trace_id, path=route):
             response = await call_next(request)
@@ -250,34 +295,45 @@ def create_app() -> FastAPI:
 
     # ------------------------------------------------------------ health
     @app.get("/api/v1/health/livez", tags=["System"], summary="Liveness probe")
-    async def livez() -> dict[str, str]:
+    def livez() -> dict[str, str]:
         """Process is up. Must not depend on external services."""
         return {"status": "ok", "version": __version__}
 
     @app.get("/api/v1/health/readyz", tags=["System"], summary="Readiness probe")
-    async def readyz() -> JSONResponse:
-        """Dependencies are reachable. Returns 503 when a required dependency is down."""
+    def readyz() -> JSONResponse:
+        """Every *required* dependency answers. Returns 503 otherwise.
+
+        FFmpeg is in the required set: without it uploads, analysis and rendering all fail, so a
+        deployment that cannot render must not be routed traffic.
+        """
         s = get_settings()
-        deps = await _check_dependencies(s)
-        required_ok = all(deps[k]["status"] == "ok" for k in ("database", "redis", "storage"))
+        deps = _check_dependencies(s)
+        required_ok = all(deps[name]["status"] == "ok" for name in REQUIRED_DEPENDENCIES)
         return JSONResponse(
             status_code=200 if required_ok else 503,
             content={"status": "ok" if required_ok else "degraded", "dependencies": deps},
         )
 
-    @app.get("/api/v1/health", tags=["System"], summary="Full health and integration report")
-    async def health() -> JSONResponse:
+    @app.get("/api/v1/health", tags=["System"], summary="Health and integration report")
+    def health() -> JSONResponse:
+        """Readiness plus the integration inventory.
+
+        The inventory says which third-party providers are configured, which is useful in
+        development and is free reconnaissance in production — so it is omitted when
+        `ENVIRONMENT=production`.
+        """
         s = get_settings()
-        deps = await _check_dependencies(s)
-        integrations = s.integration_status()
-        required_ok = all(deps[k]["status"] == "ok" for k in ("database", "redis", "storage"))
-        payload = {
+        deps = _check_dependencies(s)
+        required_ok = all(deps[name]["status"] == "ok" for name in REQUIRED_DEPENDENCIES)
+        payload: dict[str, Any] = {
             "status": "ok" if required_ok else "degraded",
             "version": __version__,
-            "environment": s.environment,
             "dependencies": deps,
-            "integrations": integrations,
-            "notes": [
+        }
+        if s.environment != "production":
+            payload["environment"] = s.environment
+            payload["integrations"] = s.integration_status()
+            payload["notes"] = [
                 (
                     "Optional integrations reporting configured=false are disabled by design, "
                     "not failing. Publishing requires YOUTUBE_CLIENT_ID/SECRET."
@@ -286,18 +342,19 @@ def create_app() -> FastAPI:
                     "AI analysis falls back to deterministic heuristics when no provider is set; "
                     "output quality is lower and labelled as heuristic in the UI."
                 ),
-            ],
-        }
+            ]
         return JSONResponse(status_code=200 if required_ok else 503, content=payload)
 
     return app
 
 
-async def _check_dependencies(s: Any) -> dict[str, dict[str, str]]:
+def _check_dependencies(s: Any) -> dict[str, dict[str, str]]:
     """Probe each dependency. Honest results only — no optimistic defaults.
 
-    Imports are top-level so a missing optional driver surfaces as a clear dependency
-    failure rather than an ImportError inside a probe.
+    Deliberately synchronous: the probes below (psycopg, redis-py) are blocking clients, so this
+    function is called from sync route handlers and therefore runs in FastAPI's threadpool. An
+    `async def` version called them directly and blocked the event loop for the duration of a
+    connection timeout on every probe.
     """
     deps: dict[str, dict[str, str]] = {}
 
@@ -311,25 +368,38 @@ async def _check_dependencies(s: Any) -> dict[str, dict[str, str]]:
         deps["database"] = {"status": "down", "detail": type(exc).__name__}
 
     # redis
+    client = None
     try:
-        client = aioredis.from_url(s.redis_url, socket_connect_timeout=3)
-        await client.ping()
-        await client.aclose()
+        client = redis.from_url(
+            s.redis_url,
+            socket_connect_timeout=3,
+            socket_timeout=3,
+        )
+        client.ping()
         deps["redis"] = {"status": "ok", "detail": "reachable"}
     except Exception as exc:  # noqa: BLE001
         deps["redis"] = {"status": "down", "detail": type(exc).__name__}
+    finally:
+        if client is not None:
+            # A probe that leaks a connection per call exhausts the server's client limit.
+            with contextlib.suppress(Exception):
+                client.close()
 
     # storage
     if s.storage_backend == "local":
         root = Path(s.local_storage_root)
         try:
-            root.mkdir(parents=True, exist_ok=True)
-            ok = root.exists() and os.access(root, os.W_OK)
-            free_gb = shutil.disk_usage(root).free / 1e9
+            # No mkdir: a health check must not create directories. If the root is absent, the
+            # deployment is misconfigured and the finding is the point.
+            exists = root.exists()
+            ok = exists and os.access(root, os.W_OK)
+            free_gb = shutil.disk_usage(root).free / 1e9 if exists else 0.0
             deps["storage"] = {
-                "status": "ok" if ok else "degraded",
-                "detail": f"local root writable={ok}, free={free_gb:.1f}GB"
-                + ("" if free_gb >= s.min_free_disk_gb else " (below MIN_FREE_DISK_GB)"),
+                "status": "ok" if ok else "down",
+                "detail": (
+                    f"local root exists={exists}, writable={ok}, free={free_gb:.1f}GB"
+                    + ("" if free_gb >= s.min_free_disk_gb else " (below MIN_FREE_DISK_GB)")
+                ),
             }
         except Exception as exc:  # noqa: BLE001
             deps["storage"] = {"status": "down", "detail": type(exc).__name__}

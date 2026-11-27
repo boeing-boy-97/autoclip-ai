@@ -99,7 +99,6 @@ class IngestService:
         # that same handle would store a file with its header missing — corrupt bytes that still
         # look plausible in the metadata.
         with open(spool_path, "rb") as fh:  # noqa: PTH123
-
             # ---- stream into storage, enforcing the size cap and computing the checksum
             max_bytes = self.settings.max_upload_mb * 1024 * 1024
             key = build_key(

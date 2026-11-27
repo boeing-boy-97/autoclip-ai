@@ -10,12 +10,12 @@ Structural guarantees this module keeps (from the template contract, not optiona
   * captions come only from real ASR word timings (see `captions.py`); no timing is invented
   * pitch is never altered — no `asetrate`/`atempo` pitch-shifting filter is used
 """
+
 from __future__ import annotations
 
 import hashlib
 import json
 import logging
-import shutil
 import subprocess
 import time
 from dataclasses import dataclass, field
@@ -155,8 +155,16 @@ def _run(cmd: list[str], *, timeout: int = 900) -> subprocess.CompletedProcess:
 def probe_source_size(source: Path, ffprobe_bin: str = "ffprobe") -> tuple[int, int]:
     proc = _run(
         [
-            ffprobe_bin, "-v", "error", "-select_streams", "v:0",
-            "-show_entries", "stream=width,height", "-of", "json", str(source),
+            ffprobe_bin,
+            "-v",
+            "error",
+            "-select_streams",
+            "v:0",
+            "-show_entries",
+            "stream=width,height",
+            "-of",
+            "json",
+            str(source),
         ],
         timeout=60,
     )
@@ -277,6 +285,7 @@ def render_clip(
     plan: RenderPlan,
     ass_path: Path | None,
     ffmpeg_bin: str = "ffmpeg",
+    ffprobe_bin: str = "ffprobe",
     target_lufs: float | None = -14.0,
 ) -> RenderResult:
     """Cut, reframe and caption one clip. Raises `RenderError` on failure."""
@@ -294,18 +303,45 @@ def render_clip(
     af = ",".join(audio_filters)
 
     cmd = [
-        ffmpeg_bin, "-hide_banner", "-nostdin", "-y",
+        ffmpeg_bin,
+        "-hide_banner",
+        "-nostdin",
+        "-y",
         # Seek before -i for a fast, accurate cut: decoding from the keyframe then discarding is
         # what makes a 3-second clip of a long video take seconds rather than minutes.
-        "-ss", f"{start_s:.3f}", "-i", str(source_path),
-        "-t", f"{duration_s:.3f}",
-        "-vf", _filter_chain(plan, ass_path),
-        "-af", af,
-        "-c:v", plan.encoder, "-preset", plan.preset, "-crf", str(plan.crf),
-        "-pix_fmt", "yuv420p",
-        "-c:a", "aac", "-b:a", "128k", "-ar", "48000", "-ac", "2",
-        "-movflags", "+faststart",
-        "-progress", "pipe:1", "-nostats",
+        "-ss",
+        f"{start_s:.3f}",
+        "-i",
+        str(source_path),
+        "-t",
+        f"{duration_s:.3f}",
+        "-vf",
+        _filter_chain(plan, ass_path),
+        "-af",
+        af,
+        "-c:v",
+        plan.encoder,
+        "-preset",
+        plan.preset,
+        "-crf",
+        str(plan.crf),
+        "-pix_fmt",
+        "yuv420p",
+        "-c:a",
+        "aac",
+        "-b:a",
+        "128k",
+        "-ar",
+        "48000",
+        "-ac",
+        "2",
+        "-movflags",
+        "+faststart",
+        # No `-progress pipe:1`: the entire progress stream would be buffered in memory for the
+        # length of the render. The encoder's stderr tail is enough to explain a failure.
+        "-loglevel",
+        "error",
+        "-nostats",
         str(output_path),
     ]
 
@@ -329,13 +365,13 @@ def render_clip(
 
     # Verify what we produced rather than assuming: a render that silently lost its audio or
     # came out at the wrong size is a failure, not a success with a caveat.
-    width, height, out_duration = _probe_output(output_path, ffmpeg_bin)
+    width, height, out_duration = _probe_output(output_path, ffprobe_bin)
     if (width, height) != (plan.width, plan.height):
         raise RenderError(
             "render_wrong_dimensions",
             f"expected {plan.width}x{plan.height}, got {width}x{height}",
         )
-    if not _has_audio(output_path):
+    if not _has_audio(output_path, ffprobe_bin):
         raise RenderError("render_no_audio", "the rendered clip has no audio stream")
 
     return RenderResult(
@@ -347,16 +383,25 @@ def render_clip(
         sha256=digest.hexdigest(),
         render_seconds=round(elapsed, 3),
         plan=plan,
-        encoder_log=(proc.stdout or "")[-4000:],
+        encoder_log=(proc.stderr or "")[-4000:],
     )
 
 
-def _probe_output(path: Path, ffmpeg_bin: str) -> tuple[int, int, int]:
-    ffprobe = shutil.which("ffprobe") or str(Path(ffmpeg_bin).parent / "ffprobe")
+def _probe_output(path: Path, ffprobe_bin: str = "ffprobe") -> tuple[int, int, int]:
+    """Verify the rendered file with the *configured* ffprobe (never a guessed one)."""
+    ffprobe = ffprobe_bin
     proc = _run(
         [
-            ffprobe, "-v", "error", "-select_streams", "v:0",
-            "-show_entries", "stream=width,height:format=duration", "-of", "json", str(path),
+            ffprobe,
+            "-v",
+            "error",
+            "-select_streams",
+            "v:0",
+            "-show_entries",
+            "stream=width,height:format=duration",
+            "-of",
+            "json",
+            str(path),
         ],
         timeout=60,
     )
@@ -368,12 +413,20 @@ def _probe_output(path: Path, ffmpeg_bin: str) -> tuple[int, int, int]:
     return int(stream.get("width", 0)), int(stream.get("height", 0)), round(duration * 1000)
 
 
-def _has_audio(path: Path) -> bool:
-    ffprobe = shutil.which("ffprobe") or "ffprobe"
+def _has_audio(path: Path, ffprobe_bin: str = "ffprobe") -> bool:
+    ffprobe = ffprobe_bin
     proc = _run(
         [
-            ffprobe, "-v", "error", "-select_streams", "a:0",
-            "-show_entries", "stream=codec_type", "-of", "csv=p=0", str(path),
+            ffprobe,
+            "-v",
+            "error",
+            "-select_streams",
+            "a:0",
+            "-show_entries",
+            "stream=codec_type",
+            "-of",
+            "csv=p=0",
+            str(path),
         ],
         timeout=60,
     )

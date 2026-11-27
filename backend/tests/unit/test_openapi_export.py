@@ -1,4 +1,5 @@
 """The committed implemented-API spec must match what the app actually serves."""
+
 from __future__ import annotations
 
 import json
@@ -20,8 +21,7 @@ def test_committed_spec_matches_app():
     committed = json.loads(DEFAULT_OUT.read_text())
     live = json.loads(json.dumps(build_spec()))
     assert committed == live, (
-        "docs/openapi-implemented.json is out of date — run "
-        "`python -m app.scripts.export_openapi`"
+        "docs/openapi-implemented.json is out of date — run `python -m app.scripts.export_openapi`"
     )
 
 

@@ -11,6 +11,7 @@ Rendering is append-only: every render creates a new version with its own plan, 
 Nothing overwrites a previous file, so a bad render can be compared with the good one instead of
 silently replacing it.
 """
+
 from __future__ import annotations
 
 import contextlib
@@ -27,7 +28,6 @@ from sqlalchemy.orm import Session
 from app.core.config import Settings
 from app.db.models import (
     CandidateMoment,
-    CandidateScore,
     Clip,
     ClipVersion,
     MediaAsset,
@@ -183,9 +183,7 @@ class ClipService:
                 "existing_count": existing,
             },
         )
-        return GenerateOutcome(
-            created=len(created_ids), existing=existing, clip_ids=created_ids
-        )
+        return GenerateOutcome(created=len(created_ids), existing=existing, clip_ids=created_ids)
 
     # ------------------------------------------------------------------ rendering
     def render(
@@ -207,9 +205,7 @@ class ClipService:
             )
 
         try:
-            template = Template.load(
-                template_key or clip.template_key, self.settings.template_dir
-            )
+            template = Template.load(template_key or clip.template_key, self.settings.template_dir)
         except RenderError as exc:
             # A missing template is a bad request, not a server fault.
             raise ClipError(exc.code, exc.detail, status_code=422) from exc
@@ -288,22 +284,31 @@ class ClipService:
                 plan=plan,
                 ass_path=ass_path if track.has_captions else None,
                 ffmpeg_bin=self.settings.ffmpeg_bin,
-                target_lufs=self.settings.audio_target_lufs
-                if template.audio_loudnorm
-                else None,
+                ffprobe_bin=self.settings.ffprobe_bin,
+                target_lufs=self.settings.audio_target_lufs if template.audio_loudnorm else None,
             )
 
             self.jobs.set_progress(
                 workspace_id=workspace_id, job_id=job_ref, progress=85, note="storing assets"
             )
             video_asset = self._store_asset(
-                clip=clip, kind="clip_video", path=output, mime="video/mp4",
-                duration_ms=result.duration_ms, width=result.width, height=result.height,
+                clip=clip,
+                kind="clip_video",
+                path=output,
+                mime="video/mp4",
+                duration_ms=result.duration_ms,
+                width=result.width,
+                height=result.height,
             )
             caption_asset = (
                 self._store_asset(
-                    clip=clip, kind="caption_ass", path=ass_path, mime="text/plain",
-                    duration_ms=None, width=None, height=None,
+                    clip=clip,
+                    kind="caption_ass",
+                    path=ass_path,
+                    mime="text/plain",
+                    duration_ms=None,
+                    width=None,
+                    height=None,
                 )
                 if track.has_captions
                 else None
@@ -476,9 +481,7 @@ class ClipService:
             fresh = self.db.get(Clip, clip.id)
             if fresh is not None:
                 fresh.state = "QA_FAILED"
-                fresh.meta = {
-                    **(fresh.meta or {}), "last_render_error": detail[:2000]
-                }
+                fresh.meta = {**(fresh.meta or {}), "last_render_error": detail[:2000]}
             self.db.commit()
         except Exception:  # noqa: BLE001
             self.db.rollback()
@@ -531,11 +534,18 @@ class ClipService:
         return out
 
     def _materialise_source(self, source: SourceVideo, scratch: Path) -> Path:
-        local = Path(self.settings.local_storage_root) / (source.storage_key or "")
-        if source.storage_key and local.exists():
+        key = source.storage_key
+        if not key:
+            raise ClipError(
+                "source_not_ready",
+                "the source video has no stored object to render from",
+                status_code=409,
+            )
+        local = Path(self.settings.local_storage_root) / key
+        if local.exists():
             return local
         target = scratch / "source.mp4"
-        with self.storage.open(source.storage_key) as src, target.open("wb") as dst:
+        with self.storage.open(key) as src, target.open("wb") as dst:
             shutil.copyfileobj(src, dst, length=1024 * 1024)
         return target
 
@@ -594,13 +604,3 @@ def _title_for(moment: CandidateMoment) -> str:
         if text:
             return text[:120]
     return f"{moment.category.replace('_', ' ').title()} moment"
-
-
-def scores_for(db: Session, clip: Clip) -> dict | None:
-    """Attach the originating moment's scores so a clip is as explainable as its moment."""
-    if clip.candidate_moment_id is None:
-        return None
-    row = db.scalar(
-        select(CandidateScore).where(CandidateScore.candidate_id == clip.candidate_moment_id)
-    )
-    return None if row is None else row

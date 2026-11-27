@@ -148,9 +148,7 @@ class TestRejections:
     def test_audio_only_file_is_refused(self, alice: Actor):
         """A WAV has no video stream, so it cannot produce video output."""
         project = alice.create_project()
-        resp = upload(
-            alice, project["id"], fixture("speech_10s.wav"), content_type="audio/wav"
-        )
+        resp = upload(alice, project["id"], fixture("speech_10s.wav"), content_type="audio/wav")
         assert resp.status_code == 415, resp.text
         assert resp.json()["code"] == "unsupported_media"  # .wav is not an allowed extension
 

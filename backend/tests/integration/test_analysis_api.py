@@ -65,8 +65,7 @@ class TestTranscription:
         assert resp.status_code == 202, resp.text
 
         body = alice.client.get(
-            f"/api/v1/workspaces/{alice.workspace_id}/projects/{ready_project['id']}"
-            "/transcript"
+            f"/api/v1/workspaces/{alice.workspace_id}/projects/{ready_project['id']}/transcript"
         )
         assert body.status_code == 200
         transcript = body.json()
@@ -85,8 +84,7 @@ class TestTranscription:
     def test_segments_are_ordered_and_within_the_source(self, alice: Actor, ready_project):
         analyse(alice, ready_project["id"])
         transcript = alice.client.get(
-            f"/api/v1/workspaces/{alice.workspace_id}/projects/{ready_project['id']}"
-            "/transcript"
+            f"/api/v1/workspaces/{alice.workspace_id}/projects/{ready_project['id']}/transcript"
         ).json()
 
         starts = [s["start_ms"] for s in transcript["segments"]]
@@ -96,10 +94,7 @@ class TestTranscription:
 
     def test_word_timings_are_opt_in(self, alice: Actor, ready_project):
         analyse(alice, ready_project["id"])
-        url = (
-            f"/api/v1/workspaces/{alice.workspace_id}/projects/{ready_project['id']}"
-            "/transcript"
-        )
+        url = f"/api/v1/workspaces/{alice.workspace_id}/projects/{ready_project['id']}/transcript"
         lean = alice.client.get(url).json()
         rich = alice.client.get(url, params={"include_words": True}).json()
 
@@ -208,10 +203,21 @@ class TestScoring:
             assert score is not None
             # Ten criteria plus four aggregates, all bounded.
             for key in (
-                "hook", "content_value", "narrative", "standalone", "audience", "emotion",
-                "visual_quality", "audio_quality", "ending_strength", "clarity",
-                "content_potential", "technical_quality", "context_completeness",
-                "audience_relevance", "overall",
+                "hook",
+                "content_value",
+                "narrative",
+                "standalone",
+                "audience",
+                "emotion",
+                "visual_quality",
+                "audio_quality",
+                "ending_strength",
+                "clarity",
+                "content_potential",
+                "technical_quality",
+                "context_completeness",
+                "audience_relevance",
+                "overall",
             ):
                 assert 0 <= score[key] <= 100, f"{key} out of range: {score[key]}"
             assert score["weights_version"]
@@ -243,9 +249,7 @@ class TestScoring:
             m["score"]["overall"] for m in second["items"]
         ]
 
-    def test_candidates_are_ranked_and_suppression_is_explained(
-        self, alice: Actor, ready_project
-    ):
+    def test_candidates_are_ranked_and_suppression_is_explained(self, alice: Actor, ready_project):
         analyse(alice, ready_project["id"])
         page = alice.client.get(
             f"/api/v1/workspaces/{alice.workspace_id}/projects/{ready_project['id']}/moments"
@@ -318,9 +322,7 @@ class TestHonestFailures:
         assert status["has_transcript"] is False
         assert status["candidate_count"] == 0
 
-    def test_no_transcript_rows_are_written_on_failure(
-        self, alice: Actor, db_engine
-    ):
+    def test_no_transcript_rows_are_written_on_failure(self, alice: Actor, db_engine):
         project = alice.create_project(name="No Speech 2")
         tones = MEDIA / "talking_30s.mp4"
         if not tones.exists():

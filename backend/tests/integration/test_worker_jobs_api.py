@@ -10,6 +10,7 @@ The tests below focus on the behaviour most likely to regress silently: a job th
 closed, a retry that resumes nothing, and an error that loses its HTTP contract on the way
 through Celery.
 """
+
 from __future__ import annotations
 
 import uuid

@@ -123,11 +123,23 @@ class TestProductionGuards:
         s = make(
             environment="production",
             storage_backend="s3",
+            session_cookie_secure=True,
             s3_bucket="bucket",
             s3_access_key_id="key",
             s3_secret_access_key="secret",
         )
         assert s.storage_configured is True
+
+    def test_production_rejects_insecure_session_cookie(self):
+        """A production cookie that is not `Secure` would travel over plaintext connections."""
+        with pytest.raises(ValidationError) as exc:
+            make(
+                environment="production",
+                storage_backend="s3",
+                s3_bucket="b",
+                session_cookie_secure=False,
+            )
+        assert "session_cookie_secure" in str(exc.value)
 
 
 class TestNeonEnvironment:

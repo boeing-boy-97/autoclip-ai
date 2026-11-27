@@ -93,9 +93,7 @@ STAGE_GRAPH: dict[ProjectStage, frozenset[ProjectStage]] = {
     ProjectStage.CAPTION_RENDERING: frozenset({ProjectStage.AUDIO_ENHANCEMENT}),
     ProjectStage.AUDIO_ENHANCEMENT: frozenset({ProjectStage.QUALITY_CHECK}),
     # QA loops back into repair at most twice, or forwards for human review.
-    ProjectStage.QUALITY_CHECK: frozenset(
-        {ProjectStage.AUTO_REPAIR, ProjectStage.AWAITING_REVIEW}
-    ),
+    ProjectStage.QUALITY_CHECK: frozenset({ProjectStage.AUTO_REPAIR, ProjectStage.AWAITING_REVIEW}),
     ProjectStage.AUTO_REPAIR: frozenset({ProjectStage.QUALITY_CHECK, ProjectStage.AWAITING_REVIEW}),
     ProjectStage.AWAITING_REVIEW: frozenset(
         {

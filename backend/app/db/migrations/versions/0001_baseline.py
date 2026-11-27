@@ -729,19 +729,58 @@ END $$;
 
 # Objects in reverse dependency order for a clean downgrade.
 DROP_ORDER = [
-    "audit_logs", "usage_records", "notifications", "processing_jobs",
-    "analytics_snapshots", "publishing_records", "publishing_jobs", "oauth_states",
-    "oauth_credentials", "youtube_channels", "repair_attempts", "quality_reports",
-    "captions", "clip_edit_settings", "clip_versions", "clips", "candidate_scores",
-    "candidate_moments", "important_moments", "topics", "video_analysis", "scenes",
-    "transcript_segments", "speakers", "transcripts", "media_assets", "source_videos",
-    "project_stage_events", "projects", "workspace_members", "sessions", "workspaces", "users",
+    "audit_logs",
+    "usage_records",
+    "notifications",
+    "processing_jobs",
+    "analytics_snapshots",
+    "publishing_records",
+    "publishing_jobs",
+    "oauth_states",
+    "oauth_credentials",
+    "youtube_channels",
+    "repair_attempts",
+    "quality_reports",
+    "captions",
+    "clip_edit_settings",
+    "clip_versions",
+    "clips",
+    "candidate_scores",
+    "candidate_moments",
+    "important_moments",
+    "topics",
+    "video_analysis",
+    "scenes",
+    "transcript_segments",
+    "speakers",
+    "transcripts",
+    "media_assets",
+    "source_videos",
+    "project_stage_events",
+    "projects",
+    "workspace_members",
+    "sessions",
+    "workspaces",
+    "users",
 ]
 
 ENUMS = [
-    "user_status", "workspace_role", "project_status", "source_kind", "source_state",
-    "media_asset_kind", "job_status", "clip_state", "qa_verdict", "qa_kind", "publish_state",
-    "publish_mode", "privacy_status", "channel_state", "notification_kind", "moment_category",
+    "user_status",
+    "workspace_role",
+    "project_status",
+    "source_kind",
+    "source_state",
+    "media_asset_kind",
+    "job_status",
+    "clip_state",
+    "qa_verdict",
+    "qa_kind",
+    "publish_state",
+    "publish_mode",
+    "privacy_status",
+    "channel_state",
+    "notification_kind",
+    "moment_category",
 ]
 
 
@@ -766,14 +805,12 @@ def upgrade() -> None:
     sql = BASELINE_SQL
     if not has_vector:
         # Drop the optional embedding columns rather than failing the whole migration.
-        kept = [
-            line
-            for line in sql.splitlines()
-            if "vector(" not in line
-        ]
+        kept = [line for line in sql.splitlines() if "vector(" not in line]
         # Remove a dangling comma from the preceding line where the dropped column was last.
         sql = "\n".join(kept)
-        sql = sql.replace("embedding       vector(1536),                            -- optional pgvector\n", "")
+        sql = sql.replace(
+            "embedding       vector(1536),                            -- optional pgvector\n", ""
+        )
         conn.execute(
             sa.text(
                 "DO $$ BEGIN RAISE NOTICE "
