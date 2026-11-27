@@ -37,6 +37,7 @@ from fastapi.responses import JSONResponse
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from app import __version__
+from app.core import preflight
 from app.core.config import get_settings
 from app.core.logging import configure_logging, get_logger
 
@@ -76,6 +77,20 @@ async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
     log = get_logger(__name__)
     s = get_settings()
     configure_logging(level=s.log_level, fmt=s.log_format)
+
+    # Deployment self-check before the first request is served. Warnings are logged and surfaced by
+    # /health/readyz; a fatal issue refuses the start, because accepting traffic that cannot upload
+    # or render only converts a deploy-time misconfiguration into a user-visible outage.
+    issues = preflight.check(s)
+    for issue in issues:
+        (log.error if issue.level == "error" else log.warning)(
+            "app.preflight", code=issue.code, detail=issue.detail
+        )
+    blocking = preflight.fatal(issues)
+    if blocking:
+        joined = "; ".join(f"{issue.code}: {issue.detail}" for issue in blocking)
+        raise RuntimeError(f"refusing to start: {joined}")
+
     log.info(
         "app.started",
         version=__version__,

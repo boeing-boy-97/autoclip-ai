@@ -66,8 +66,47 @@ defects. All of the following are fixed on this branch, each with a regression t
     `pip-audit || true` no longer mask failures; `verify_migrations.sh` runs; ruff is pinned.
 
 Verification in this environment: `ruff check` clean, `ruff format --check` clean over
-`backend/app` + `backend/tests`, `pytest tests/unit` green (200 tests). The integration suite needs
-PostgreSQL + Redis and was not run here — it is exercised by CI's `test-integration` job.
+`backend/app` + `backend/tests`, `pytest tests/unit` green (193 passed, 10 skipped). The integration
+suite needs PostgreSQL + Redis and was not run here — it is exercised by CI's `test-integration` job.
+
+### 0A. Deploying without Docker — PaaS, API + workers (2026-11-27)
+
+The deployment target is a platform (Render / Railway / Fly / Heroku), not a compose stack, and it
+must run the API **and** the background workers. Docker remains only the build recipe the platform
+executes. New in this pass:
+
+1. `backend/scripts/start_api.sh` — honours `$PORT`, `WEB_CONCURRENCY` (default 1), `UVICORN_KEEP_ALIVE`
+   (default 75 s, longer than a proxy's ~60 s idle timeout), `FORWARDED_ALLOW_IPS` and
+   `MIGRATE_ON_START`; runs `python -m uvicorn` so it works without console scripts on `PATH`.
+2. `start_worker.sh` / `start_beat.sh` — same interpreter handling, queues `media,transcribe,analyze`,
+   `--max-tasks-per-child`, a configurable beat schedule file, and a warning that beat is
+   single-instance by definition.
+3. `release.sh` + `app/scripts/migrate.py` — release-phase migrations under a PostgreSQL advisory
+   lock, non-zero exit on failure, `--check` mode, and a URL resolved from the environment so the hook
+   needs **only** `DATABASE_URL` (a missing Redis or S3 setting fails the web deploy instead, with a
+   message naming it).
+4. `app/core/preflight.py` — startup self-check. Fatal: unusable `TMP_ROOT`/storage root, local
+   storage in production, S3 not configured. Warnings (startup continues): missing FFmpeg, empty ASR
+   weight cache, public docs in production, wildcard `TRUSTED_HOSTS`, insecure session cookie, rate
+   limiting disabled, `TMP_ROOT` smaller than `MAX_UPLOAD_MB`. Each is logged as `app.preflight`.
+5. `backend/Dockerfile` — `production` is now the **last** stage; with `dev` last, a plain cloud build
+   silently deployed a `--reload` server. Non-root uid 10001, `tini`, HEALTHCHECK on
+   `/api/v1/health/readyz`.
+6. `docs/DEPLOY.md` + `deploy/fly.toml.example` — component table, full env list, per-platform release
+   hook and start commands, troubleshooting table keyed on the exact log lines above.
+
+Verified here with real processes (no Docker, no database): the API started through
+`./scripts/start_api.sh` and answered `livez` 200 with `/docs` 200 in development; the same binary
+under `ENVIRONMENT=production` refused to start with
+`storage_backend=local is not permitted in production` and, with S3 configured instead, started
+while logging `media_tooling_missing`, `asr_model_cache_missing`, `docs_enabled_in_production` and
+`trusted_hosts_wildcard`; `release.sh --check` exited 1 with the connection error and
+`MIGRATE_ON_START=true` aborted before serving. `backend/tests/unit/test_deploy.py` (36 tests) locks
+all of that in.
+
+Not verified, stated plainly: no real platform build, no PostgreSQL in this sandbox, so migrations
+have never been applied against a live database here, and no FFmpeg, so media paths were not
+exercised. The Dockerfile was reviewed line by line, not built.
 
 ---
 
