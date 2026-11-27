@@ -15,7 +15,7 @@ from functools import lru_cache
 from typing import Literal
 from urllib.parse import urlparse
 
-from pydantic import Field, ValidationInfo, field_validator, model_validator
+from pydantic import AliasChoices, Field, ValidationInfo, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 Environment = Literal["development", "test", "production"]
@@ -28,10 +28,11 @@ PLACEHOLDER_MARKERS = ("REPLACE_ME", "changeme", "CHANGE_ME", "your-", "xxxx")
 
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(
-        env_file=(".env", "../.env"),
+        env_file=(".env", ".env.local", "../.env", "../.env.local"),
         env_file_encoding="utf-8",
         extra="ignore",
         case_sensitive=False,
+        populate_by_name=True,
     )
 
     # ---------------------------------------------------------------- app
@@ -59,7 +60,10 @@ class Settings(BaseSettings):
 
     # ---------------------------------------------------------------- database (required)
     database_url: str = Field(..., min_length=1)
-    database_url_migrations: str | None = None
+    database_url_migrations: str | None = Field(
+        default=None,
+        validation_alias=AliasChoices("DATABASE_URL_MIGRATIONS", "DATABASE_URL_UNPOOLED"),
+    )
     db_pool_size: int = 10
     db_max_overflow: int = 20
     db_pool_timeout: int = 30
@@ -78,11 +82,23 @@ class Settings(BaseSettings):
     # ---------------------------------------------------------------- storage
     storage_backend: StorageBackend = "local"
     local_storage_root: str = "./storage"
-    s3_endpoint_url: str | None = None
-    s3_region: str = "auto"
+    s3_endpoint_url: str | None = Field(
+        default=None,
+        validation_alias=AliasChoices("AWS_ENDPOINT_URL_S3", "S3_ENDPOINT_URL"),
+    )
+    s3_region: str = Field(
+        default="auto",
+        validation_alias=AliasChoices("AWS_REGION", "S3_REGION"),
+    )
     s3_bucket: str | None = None
-    s3_access_key_id: str | None = None
-    s3_secret_access_key: str | None = None
+    s3_access_key_id: str | None = Field(
+        default=None,
+        validation_alias=AliasChoices("AWS_ACCESS_KEY_ID", "S3_ACCESS_KEY_ID"),
+    )
+    s3_secret_access_key: str | None = Field(
+        default=None,
+        validation_alias=AliasChoices("AWS_SECRET_ACCESS_KEY", "S3_SECRET_ACCESS_KEY"),
+    )
     s3_force_path_style: bool = True
     signed_url_ttl_seconds: int = 600
     min_free_disk_gb: float = 5.0
@@ -139,6 +155,16 @@ class Settings(BaseSettings):
     api_internal_url: str = "http://localhost:8000"
 
     # ================================================================ validators
+    @field_validator("database_url", "database_url_migrations", mode="before")
+    @classmethod
+    def _normalize_postgres_driver(cls, value: str | None) -> str | None:
+        if isinstance(value, str):
+            if value.startswith("postgres://"):
+                return value.replace("postgres://", "postgresql+psycopg://", 1)
+            if value.startswith("postgresql://"):
+                return value.replace("postgresql://", "postgresql+psycopg://", 1)
+        return value
+
     @field_validator("secret_key", "secret_encryption_key")
     @classmethod
     def _validate_key(cls, v: str, info: ValidationInfo) -> str:

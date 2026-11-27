@@ -130,6 +130,27 @@ class TestProductionGuards:
         assert s.storage_configured is True
 
 
+class TestNeonEnvironment:
+    def test_neon_postgres_and_object_storage_variables_are_supported(self, monkeypatch):
+        monkeypatch.setenv("DATABASE_URL_UNPOOLED", "postgresql://u:p@db.example/test")
+        monkeypatch.setenv("AWS_ENDPOINT_URL_S3", "https://storage.example")
+        monkeypatch.setenv("AWS_REGION", "us-east-2")
+        monkeypatch.setenv("AWS_ACCESS_KEY_ID", "access")
+        monkeypatch.setenv("AWS_SECRET_ACCESS_KEY", "secret")
+
+        settings = make(
+            database_url="postgresql://u:p@db.example/app",
+            storage_backend="s3",
+            s3_bucket="uploads",
+        )
+
+        assert settings.database_url == "postgresql+psycopg://u:p@db.example/app"
+        assert settings.database_url_migrations == "postgresql+psycopg://u:p@db.example/test"
+        assert settings.s3_endpoint_url == "https://storage.example"
+        assert settings.s3_region == "us-east-2"
+        assert settings.storage_configured is True
+
+
 class TestIntegrationHonesty:
     def test_youtube_unconfigured_is_reported_not_faked(self):
         s = make()

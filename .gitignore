@@ -62,3 +62,4 @@ models/whisper/
 # Model caches: never commit weights. A stray download here was ~2.9 GB.
 backend/models/
 models/asr/
+.neon
