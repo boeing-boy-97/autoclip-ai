@@ -108,9 +108,10 @@ class LoginThrottle:
     def record_failure(self, email: str, ip: str | None) -> None:
         key = self._key(email, ip)
         try:
-            count = self.redis.incr(key)
-            if count == 1:
-                self.redis.expire(key, int(self.window.total_seconds()))
+            with self.redis.pipeline(transaction=True) as pipe:
+                pipe.incr(key)
+                pipe.expire(key, int(self.window.total_seconds()))
+                pipe.execute()
         except Exception as exc:  # noqa: BLE001
             logger.warning(
                 "login_throttle.unavailable",

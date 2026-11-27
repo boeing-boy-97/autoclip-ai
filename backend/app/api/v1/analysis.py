@@ -38,7 +38,7 @@ from app.db.models import (
     Transcript,
     TranscriptSegment,
 )
-from app.db.repositories import JobRepository
+from app.db.repositories import ConflictError, JobRepository
 from app.services.analysis import AnalysisError, AnalysisService
 from app.services.storage import StorageError, get_storage
 from app.services.transcription import AsrFailedError, AsrUnavailableError
@@ -131,6 +131,8 @@ def analyse_project(
             project_id=project_id,
             force=force,
         )
+    except ConflictError as exc:
+        raise ApiError(exc.code, exc.detail, status_code=409) from exc
     except AnalysisError as exc:
         raise ApiError(exc.code, exc.detail, status_code=exc.status_code) from exc
 
@@ -140,7 +142,7 @@ def analyse_project(
     assert job_id is not None  # a non-reused plan always reserved a job
 
     try:
-        task_id = dispatch_analysis(
+        dispatch_analysis(
             settings,
             workspace_id=workspace_id,
             project_id=project_id,
@@ -172,14 +174,10 @@ def analyse_project(
             "queue_unavailable", "the task queue is unavailable", status_code=503
         ) from exc
 
-    if task_id is not None:
-        jobs = JobRepository(db)
-        job = jobs.get(workspace_id=workspace_id, job_id=job_id)
-        job.celery_task_id = task_id
-        db.commit()
+    # Refresh fields written by dispatch or an eager worker in its own database session.
+    db.expire_all()
 
-    out = _status(db, project, transcript_id=None)
-    return out.model_copy(update={"job_id": job_id, "queued": True})
+    return _status(db, project).model_copy(update={"job_id": job_id, "queued": True})
 
 
 @router.get("/analysis", response_model=AnalysisStatusOut, summary="Get Analysis Status")

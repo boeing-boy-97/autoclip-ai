@@ -37,6 +37,7 @@ from app.api.schemas import (
     ProjectUpdate,
     StageEventOut,
 )
+from app.db.locks import guard_project
 from app.db.repositories import (
     ConflictError,
     NotFoundError,
@@ -158,6 +159,7 @@ def update_project(
     """Changing settings never mutates the source file or any existing clip version."""
     repo = ProjectRepository(db)
     try:
+        guard_project(db, ctx.workspace.id, project_id)
         project = repo.update(
             workspace_id=ctx.workspace.id,
             project_id=project_id,
@@ -184,6 +186,7 @@ def delete_project(
     """Soft delete. Refused while the project has active jobs (409 project_busy)."""
     repo = ProjectRepository(db)
     try:
+        guard_project(db, ctx.workspace.id, project_id)
         repo.soft_delete(workspace_id=ctx.workspace.id, project_id=project_id)
     except (NotFoundError, ConflictError) as exc:
         db.rollback()

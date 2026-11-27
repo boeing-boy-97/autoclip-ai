@@ -19,7 +19,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any, ClassVar
 
-from sqlalchemy import Select, delete, func, or_, select
+from sqlalchemy import Select, delete, func, literal, or_, select, tuple_
 from sqlalchemy.orm import Session, selectinload
 
 from app.core.netutil import valid_ip
@@ -210,15 +210,17 @@ class ProjectRepository:
             like = f"%{query}%"
             stmt = stmt.where(or_(Project.name.ilike(like)))
         if cursor:
-            stmt = stmt.where(Project.created_at < _decode_cursor(cursor))
+            stmt = stmt.where(_cursor_condition(Project, cursor, descending=True))
         # Fetch limit+1 to know whether a next page exists without a second COUNT.
         rows = list(
-            self.db.scalars(stmt.order_by(Project.created_at.desc(), Project.id).limit(limit + 1))
+            self.db.scalars(
+                stmt.order_by(Project.created_at.desc(), Project.id.desc()).limit(limit + 1)
+            )
         )
         next_cursor = None
         if len(rows) > limit:
             rows = rows[:limit]
-            next_cursor = _encode_cursor(rows[-1].created_at)
+            next_cursor = _encode_cursor(rows[-1].created_at, rows[-1].id)
         return Page(items=rows, next_cursor=next_cursor)
 
     def update(self, *, workspace_id: uuid.UUID, project_id: uuid.UUID, **fields: Any) -> Project:
@@ -457,6 +459,10 @@ _TERMINAL_JOB_STATUSES = frozenset({"SUCCEEDED", "FAILED", "DEAD_LETTER", "CANCE
 _RETRYABLE_JOB_STATUSES = frozenset({"FAILED", "DEAD_LETTER", "CANCELLED"})
 
 
+class JobInterruptedError(RuntimeError):
+    """A cancelled/retired execution must not write progress or success."""
+
+
 class JobRepository:
     # Queues that actually have a worker consuming them (`docker-compose.yml`,
     # `app.worker.celery_app`). A stage mapped to anything else would park its job in a queue
@@ -555,8 +561,21 @@ class JobRepository:
             )
         )
 
+    def _locked(self, workspace_id: uuid.UUID, job_id: uuid.UUID) -> ProcessingJob:
+        job = self.db.scalar(
+            select(ProcessingJob)
+            .where(ProcessingJob.id == job_id, ProcessingJob.workspace_id == workspace_id)
+            .with_for_update()
+            .execution_options(populate_existing=True)
+        )
+        if job is None:
+            raise NotFoundError("job", job_id)
+        return job
+
     def mark_running(self, *, workspace_id: uuid.UUID, job_id: uuid.UUID) -> ProcessingJob:
-        job = self.get(workspace_id=workspace_id, job_id=job_id)
+        job = self._locked(workspace_id, job_id)
+        if job.status not in {"PENDING", "RETRYING"}:
+            raise JobInterruptedError(f"job is {job.status.lower()}")
         job.status = "RUNNING"
         job.started_at = job.started_at or datetime.now(UTC)
         job.heartbeat_at = datetime.now(UTC)
@@ -572,7 +591,9 @@ class JobRepository:
         progress: int,
         note: str | None = None,
     ) -> ProcessingJob:
-        job = self.get(workspace_id=workspace_id, job_id=job_id)
+        job = self._locked(workspace_id, job_id)
+        if job.status != "RUNNING":
+            raise JobInterruptedError(f"job is {job.status.lower()}")
         job.progress = max(0, min(100, progress))
         job.progress_note = note
         job.heartbeat_at = datetime.now(UTC)
@@ -582,7 +603,9 @@ class JobRepository:
     def mark_succeeded(
         self, *, workspace_id: uuid.UUID, job_id: uuid.UUID, note: str | None = None
     ) -> ProcessingJob:
-        job = self.get(workspace_id=workspace_id, job_id=job_id)
+        job = self._locked(workspace_id, job_id)
+        if job.status not in {"PENDING", "RUNNING", "RETRYING"}:
+            raise JobInterruptedError(f"job is {job.status.lower()}")
         job.status = "SUCCEEDED"
         job.progress = 100
         job.progress_note = note
@@ -607,7 +630,9 @@ class JobRepository:
         its attempts becomes DEAD_LETTER (needs a human). A non-retryable failure — bad input,
         no speech in the file — is FAILED immediately: retrying it would just fail again.
         """
-        job = self.get(workspace_id=workspace_id, job_id=job_id)
+        job = self._locked(workspace_id, job_id)
+        if job.status in {"CANCELLED", "SUCCEEDED"}:
+            return job
         exhausted = (job.attempts or 0) >= (job.max_attempts or 3)
         job.status = "DEAD_LETTER" if (retryable and exhausted) else "FAILED"
         job.error_code = code
@@ -639,19 +664,23 @@ class JobRepository:
         if project_id:
             stmt = stmt.where(ProcessingJob.project_id == project_id)
         if cursor:
-            stmt = stmt.where(ProcessingJob.created_at < _decode_cursor(cursor))
+            stmt = stmt.where(_cursor_condition(ProcessingJob, cursor, descending=True))
         rows = list(
-            self.db.scalars(stmt.order_by(ProcessingJob.created_at.desc()).limit(limit + 1))
+            self.db.scalars(
+                stmt.order_by(ProcessingJob.created_at.desc(), ProcessingJob.id.desc()).limit(
+                    limit + 1
+                )
+            )
         )
         next_cursor = None
         if len(rows) > limit:
             rows = rows[:limit]
-            next_cursor = _encode_cursor(rows[-1].created_at)
+            next_cursor = _encode_cursor(rows[-1].created_at, rows[-1].id)
         return Page(items=rows, next_cursor=next_cursor)
 
     def mark_cancelled(self, *, workspace_id: uuid.UUID, job_id: uuid.UUID) -> ProcessingJob:
         """Cancel a job that has not finished. Cancelling finished work is a conflict."""
-        job = self.get(workspace_id=workspace_id, job_id=job_id)
+        job = self._locked(workspace_id, job_id)
         if job.status in _TERMINAL_JOB_STATUSES:
             raise ConflictError("job_not_cancellable", f"job is already {job.status.lower()}")
         job.status = "CANCELLED"
@@ -668,6 +697,11 @@ class JobRepository:
         and conflating the two would let a retry silently discard good work.
         """
         job = self.get(workspace_id=workspace_id, job_id=job_id)
+        if job.project_id is not None:
+            from app.db.locks import guard_project  # noqa: PLC0415 - avoids repository cycle
+
+            guard_project(self.db, workspace_id, job.project_id)
+        job = self._locked(workspace_id, job_id)
         if job.status not in _RETRYABLE_JOB_STATUSES:
             raise ConflictError(
                 "job_not_retryable",
@@ -681,6 +715,9 @@ class JobRepository:
         job.error_code = None
         job.error_detail = None
         job.finished_at = None
+        job.started_at = None
+        job.heartbeat_at = datetime.now(UTC)
+        job.celery_task_id = None
         job.next_retry_at = None
         self.db.flush()
         return job
@@ -742,12 +779,14 @@ class ClipRepository:
         if publishable is not None:
             stmt = stmt.where(Clip.publishable.is_(publishable))
         if cursor:
-            stmt = stmt.where(Clip.created_at > _decode_cursor(cursor))
-        rows = list(self.db.scalars(stmt.order_by(Clip.created_at.asc()).limit(limit + 1)))
+            stmt = stmt.where(_cursor_condition(Clip, cursor, descending=False))
+        rows = list(
+            self.db.scalars(stmt.order_by(Clip.created_at.asc(), Clip.id.asc()).limit(limit + 1))
+        )
         next_cursor = None
         if len(rows) > limit:
             rows = rows[:limit]
-            next_cursor = _encode_cursor(rows[-1].created_at)
+            next_cursor = _encode_cursor(rows[-1].created_at, rows[-1].id)
         return Page(items=rows, next_cursor=next_cursor)
 
     def versions(self, *, clip_id: uuid.UUID) -> list[ClipVersion]:
@@ -818,13 +857,14 @@ class DashboardRepository:
             .select_from(Project)
             .where(Project.workspace_id == workspace_id, Project.deleted_at.is_(None))
         )
-        by_status = dict(
-            self.db.execute(
+        by_status: dict[str, int] = {
+            row[0]: row[1]
+            for row in self.db.execute(
                 select(Project.status, func.count())
                 .where(Project.workspace_id == workspace_id, Project.deleted_at.is_(None))
                 .group_by(Project.status)
             ).all()
-        )
+        }
         sources_ready = self.db.scalar(
             select(func.count())
             .select_from(SourceVideo)
@@ -889,21 +929,40 @@ class DashboardRepository:
 # --------------------------------------------------------------------------- cursors
 
 
-def _encode_cursor(created_at: datetime) -> str:
+def _encode_cursor(created_at: datetime, row_id: uuid.UUID | None = None) -> str:
     """Opaque, URL-safe cursor.
 
     A raw ISO-8601 string is not safe in a query string: the `+` in `+00:00` is decoded as a
     space by form-style query parsers, silently corrupting the timestamp. Base64url of an epoch
     microsecond value is short, unambiguous and safe in any transport.
     """
-    micros = int(created_at.timestamp() * 1_000_000)
-    return base64.urlsafe_b64encode(str(micros).encode()).decode().rstrip("=")
+    delta = created_at.astimezone(UTC) - datetime(1970, 1, 1, tzinfo=UTC)
+    micros = (delta.days * 86400 + delta.seconds) * 1_000_000 + delta.microseconds
+    value = str(micros) + (f"|{row_id}" if row_id else "")
+    return base64.urlsafe_b64encode(value.encode()).decode().rstrip("=")
 
 
 def _decode_cursor(cursor: str) -> datetime:
     try:
         padded = cursor + "=" * (-len(cursor) % 4)
-        micros = int(base64.urlsafe_b64decode(padded.encode()).decode())
+        value = base64.b64decode(padded.encode(), altchars=b"-_", validate=True).decode()
+        micros = int(value.split("|", 1)[0])
         return datetime.fromtimestamp(micros / 1_000_000, tz=UTC)
+    except (ValueError, OverflowError, OSError, binascii.Error, UnicodeDecodeError) as exc:
+        raise ConflictError("invalid_cursor", "cursor is malformed or expired") from exc
+
+
+def _cursor_condition(model: Any, cursor: str, *, descending: bool) -> Any:
+    timestamp = _decode_cursor(cursor)
+    try:
+        padded = cursor + "=" * (-len(cursor) % 4)
+        value = base64.b64decode(padded.encode(), altchars=b"-_", validate=True).decode()
+        parts = value.split("|", 1)
+        if len(parts) == 1:  # previous timestamp-only cursors remain accepted
+            return model.created_at < timestamp if descending else model.created_at > timestamp
+        row_id = uuid.UUID(parts[1])
     except (ValueError, binascii.Error, UnicodeDecodeError) as exc:
         raise ConflictError("invalid_cursor", "cursor is malformed or expired") from exc
+    key = tuple_(model.created_at, model.id)
+    boundary = tuple_(literal(timestamp), literal(row_id))
+    return key < boundary if descending else key > boundary

@@ -45,7 +45,7 @@ from app.db.models import (
 from app.db.models import (
     TranscriptSegment as _SegmentView,
 )
-from app.db.repositories import ClipRepository, NotFoundError
+from app.db.repositories import ClipRepository, ConflictError, NotFoundError
 from app.services.captions import build_track, to_webvtt
 from app.services.clips import ClipError, ClipService
 from app.services.render import Template
@@ -121,6 +121,8 @@ def generate_clips(
         outcome = _service(db).generate(
             workspace_id=workspace_id, project_id=project_id, user_id=ctx.user.id
         )
+    except ConflictError as exc:
+        raise ApiError(exc.code, exc.detail, status_code=409) from exc
     except ClipError as exc:
         raise ApiError(exc.code, exc.detail, status_code=exc.status_code) from exc
 
@@ -203,6 +205,8 @@ def render_clip(
             user_id=ctx.user.id,
             template_key=template_key,
         )
+    except ConflictError as exc:
+        raise ApiError(exc.code, exc.detail, status_code=409) from exc
     except ClipError as exc:
         raise ApiError(exc.code, exc.detail, status_code=exc.status_code) from exc
 
@@ -394,6 +398,8 @@ def reject_clip(
             reason=payload.reason,
             user_id=ctx.user.id,
         )
+    except ConflictError as exc:
+        raise ApiError(exc.code, exc.detail, status_code=409) from exc
     except ClipError as exc:
         raise ApiError(exc.code, exc.detail, status_code=exc.status_code) from exc
     db.commit()
@@ -428,6 +434,8 @@ def restore_clip_version(
             version_id=version_id,
             user_id=ctx.user.id,
         )
+    except ConflictError as exc:
+        raise ApiError(exc.code, exc.detail, status_code=409) from exc
     except ClipError as exc:
         raise ApiError(exc.code, exc.detail, status_code=exc.status_code) from exc
     db.commit()
@@ -446,10 +454,20 @@ def clip_media(
     db: DbDep,
     ctx: WorkspaceViewer,  # noqa: ARG001 - authorization by declaration
     download: bool = False,
+    version_id: uuid.UUID | None = None,
 ) -> FileResponse | RedirectResponse:
     """Authorize every media request; support local byte ranges or short-lived S3 URLs."""
     clip = _clip(db, workspace_id, clip_id)
-    version = db.get(ClipVersion, clip.current_version_id) if clip.current_version_id else None
+    version: ClipVersion | None
+    if version_id is not None:
+        try:
+            version = ClipRepository(db).get_version(
+                workspace_id=workspace_id, clip_id=clip_id, version_id=version_id
+            )
+        except NotFoundError as exc:
+            raise ApiError("not_found", "clip version not found", status_code=404) from exc
+    else:
+        version = db.get(ClipVersion, clip.current_version_id) if clip.current_version_id else None
     asset = (
         db.get(MediaAsset, version.video_asset_id) if version and version.video_asset_id else None
     )

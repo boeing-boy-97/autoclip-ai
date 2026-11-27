@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import uuid
 from datetime import datetime
-from typing import Annotated, Any
+from typing import Annotated, Any, Literal
 
 from pydantic import AliasChoices, BaseModel, ConfigDict, Field, model_validator
 
@@ -113,14 +113,14 @@ class SourceOut(ORMModel):
 
 
 class ProjectCreate(BaseModel):
-    name: str = Field(min_length=1, max_length=200)
+    name: str = Field(min_length=1, max_length=200, pattern=r"\S")
     target_platform: str = "youtube_shorts"
     language: str = "en"
     clips_requested: int = Field(default=5, ge=1, le=30)
     min_duration_ms: int = Field(default=15000, ge=3000)
     max_duration_ms: int = Field(default=65000, le=180000)
     preferred_durations_ms: list[int] = Field(default_factory=lambda: [15000, 30000, 45000])
-    template_key: str = "podcast"
+    template_key: str = Field(default="podcast", pattern=r"^[a-z][a-z0-9_]{0,63}$")
     caption_style_key: str = "bold_center"
     publishing_mode: str = "manual_approval"
     budget_usd: float | None = Field(default=None, ge=0)
@@ -135,13 +135,13 @@ class ProjectCreate(BaseModel):
 
 
 class ProjectUpdate(BaseModel):
-    name: str | None = Field(default=None, min_length=1, max_length=200)
+    name: str | None = Field(default=None, min_length=1, max_length=200, pattern=r"\S")
     clips_requested: int | None = Field(default=None, ge=1, le=30)
     min_duration_ms: int | None = Field(default=None, ge=3000)
     max_duration_ms: int | None = Field(default=None, le=180000)
-    template_key: str | None = None
+    template_key: str | None = Field(default=None, pattern=r"^[a-z][a-z0-9_]{0,63}$")
     caption_style_key: str | None = None
-    publishing_mode: str | None = None
+    publishing_mode: Literal["auto", "manual_approval", "private_review"] | None = None
     budget_usd: float | None = Field(default=None, ge=0)
 
 

@@ -19,7 +19,7 @@ from __future__ import annotations
 import logging
 import time
 from dataclasses import dataclass
-from typing import Protocol
+from typing import Any, Protocol
 
 logger = logging.getLogger(__name__)
 
@@ -27,11 +27,7 @@ logger = logging.getLogger(__name__)
 class CounterClient(Protocol):
     """The slice of the Redis API this module needs (fakeredis satisfies it too)."""
 
-    def incr(self, key: str) -> int: ...
-
-    def expire(self, key: str, seconds: int) -> bool: ...
-
-    def ttl(self, key: str) -> int: ...
+    def pipeline(self, transaction: bool = True) -> Any: ...
 
 
 @dataclass(frozen=True)
@@ -77,11 +73,14 @@ class FixedWindowLimiter:
 
         key = self._key(scope, identity, window_seconds, now if now is not None else time.time())
         try:
-            count = int(self.client.incr(key))
-            if count == 1:
-                # One extra second so a request at the window edge cannot see a key about to die.
-                self.client.expire(key, window_seconds + 1)
-            ttl = int(self.client.ttl(key) or 0)
+            # MULTI/EXEC makes increment + expiry indivisible, including on client crashes.
+            # Refreshing expiry is safe: the bucket is part of the key, never a sliding window.
+            with self.client.pipeline(transaction=True) as pipe:
+                pipe.incr(key)
+                pipe.expire(key, window_seconds + 1)
+                pipe.ttl(key)
+                count, _expiry_set, ttl = pipe.execute()
+            count, ttl = int(count), int(ttl)
         except Exception as exc:  # noqa: BLE001 - any Redis failure must not break the request
             logger.warning(
                 "ratelimit.unavailable",

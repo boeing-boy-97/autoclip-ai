@@ -21,7 +21,7 @@ from dataclasses import dataclass
 from typing import Annotated, Literal
 
 import redis
-from fastapi import Cookie, Depends, Header, Request
+from fastapi import Depends, Header, Request
 from sqlalchemy.orm import Session as DbSession
 
 from app.core.config import Settings, get_settings
@@ -117,7 +117,8 @@ AuthServiceDep = Annotated[AuthService, Depends(get_auth_service)]
 
 def current_auth(
     auth: AuthServiceDep,
-    ac_session: Annotated[str | None, Cookie(alias="ac_session")] = None,
+    request: Request,
+    settings: SettingsDep,
     authorization: Annotated[str | None, Header()] = None,
 ) -> AuthContext:
     """Authenticate via session cookie or bearer token.
@@ -129,8 +130,9 @@ def current_auth(
     """
     token: str | None = None
     via: Literal["cookie", "bearer"] = "cookie"
-    if ac_session:
-        token, via = ac_session, "cookie"
+    session_cookie = request.cookies.get(settings.session_cookie_name)
+    if session_cookie:
+        token, via = session_cookie, "cookie"
     elif authorization and authorization.lower().startswith("bearer "):
         token, via = authorization[7:].strip(), "bearer"
     if not token:

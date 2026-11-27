@@ -29,6 +29,7 @@ from app.api.deps import (
 from app.api.schemas import JobOut, JobPage
 from app.core.config import get_settings
 from app.db.repositories import ConflictError, JobRepository, NotFoundError, ProcessingJob
+from app.services.analysis import AnalysisError
 from app.worker.dispatch import BrokerUnavailableError, dispatch_analysis
 
 router = APIRouter(prefix="/workspaces/{workspace_id}/jobs", tags=["Jobs"])
@@ -110,10 +111,9 @@ def cancel_job(
 ) -> JobOut:
     """Mark an unfinished job cancelled.
 
-    This stops the *record* from being picked up or retried. It cannot interrupt a task already
-    executing inside a worker process — a CPU-bound FFmpeg or ASR call is not preemptible from
-    here, and pretending otherwise would be a lie. A running task that finishes will overwrite
-    this status on its own exit path.
+    Analysis checks cancellation at durable checkpoints and before committing success. A CPU-bound
+    FFmpeg/ASR call is not preempted: cancellation takes effect when that call returns. Retry is
+    refused until the old worker releases its project execution lock.
     """
     try:
         job = JobRepository(db).mark_cancelled(workspace_id=workspace_id, job_id=job_id)
@@ -166,7 +166,7 @@ def retry_job(
     project_id = job.project_id
     assert project_id is not None  # a retryable analysis job always belongs to a project
     try:
-        task_id = dispatch_analysis(
+        dispatch_analysis(
             get_settings(),
             workspace_id=workspace_id,
             project_id=project_id,
@@ -174,6 +174,8 @@ def retry_job(
             job_id=job_id,
             force=True,
         )
+    except AnalysisError as exc:
+        raise ApiError(exc.code, exc.detail, status_code=exc.status_code) from exc
     except BrokerUnavailableError as exc:
         jobs.mark_failed(
             workspace_id=workspace_id,
@@ -186,8 +188,7 @@ def retry_job(
         raise ApiError(
             "broker_unavailable", "the task queue is unavailable", status_code=503
         ) from exc
-    if task_id is not None:
-        job = jobs.get(workspace_id=workspace_id, job_id=job_id)
-        job.celery_task_id = task_id
-        db.commit()
+    # Refresh fields written by dispatch or an eager worker in its own database session.
+    db.expire_all()
+
     return JobOut.model_validate(job)

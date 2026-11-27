@@ -63,3 +63,6 @@ models/whisper/
 backend/models/
 models/asr/
 .neon
+
+# Downloaded audit/build tools and source caches
+.cache/

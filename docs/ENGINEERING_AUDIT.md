@@ -1,10 +1,88 @@
 # Engineering audit and repair report
 
-Date: 2026-11-27 · Branch: `arena/fdfac07f-autoclip-ai`
+Date: 2026-11-27 · Current branch: `arena/e3e7743a-autoclip-ai`
+
+Earlier merged pass: `arena/fdfac07f-autoclip-ai` (PR #2).
 
 ## Executive assessment
 
-This is an implemented hardening/repair pass, **not certification that the entire application is production-ready**. Concrete defects were repaired and regression tests added. Database-backed workflows, real video processing, deployment images, external providers, and browser end-to-end behavior remain unverified in this environment. No database was modified and no secrets were printed or committed.
+This is an implemented hardening/repair pass, **not certification that the entire application is production-ready**. Concrete defects were repaired and regression tests added. The follow-up now verifies real PostgreSQL/Redis API workflows and real FFmpeg rendering. Complete speech analysis, deployment images, external providers, and browser end-to-end behavior remain unverified. Only disposable local test databases were migrated and modified; no production data was touched. No secrets were intentionally printed or committed.
+
+## Follow-up verification and repairs (current branch)
+
+**This section supersedes the earlier pass's verification counts and claims of unavailable local database/media infrastructure below.** It does not mark the audit complete or waive the remaining release gates.
+
+### Implemented follow-up fixes
+
+| Priority | Defect / repair | Principal files |
+|---|---|---|
+| High | Cancelled jobs could be overwritten by worker progress/success/failure; duplicate deliveries could run concurrently. Row-locked job transitions, project execution advisory locks, durable checkpoint commits, retired-delivery checks and pre-publish delivery identity now protect these paths. Retry waits for the previous execution to stop. | `db/locks.py`, `db/repositories.py`, `services/analysis.py`, `worker/{dispatch,tasks}.py`, `api/v1/jobs.py` |
+| High | Project mutation/deletion, clip generation, restore/reject and rendering could race running analysis/render. Shared nonblocking project guards now return 409; render commits its version before releasing execution ownership. Forced analysis cannot replace transcript/candidate history after clips exist. | `api/v1/{projects,analysis,clips}.py`, `services/{analysis,clips}.py` |
+| High | Stuck-job sweep could retire a slow but live worker. It now checks execution ownership and rechecks locked state. Never-dispatched PENDING and abandoned RETRYING jobs become visible DEAD_LETTER failures after the configured cutoff rather than blocking the project forever. This is recovery visibility, **not** transactional delivery. | `worker/tasks.py` |
+| High | Configured session cookie names were ignored by authentication/logout. Requests now read the configured name. | `api/{deps,v1/auth}.py` |
+| High | Old clip-version links resolved the current version. Media now accepts tenant/clip-scoped `version_id`; frontend links pin their displayed version. Source materialization uses LocalStorage containment checks and does not accidentally read local files for S3 storage. | `api/v1/clips.py`, `db/repositories.py`, `services/{clips,analysis}.py`, `frontend/components/ClipCard.tsx` |
+| High | Template traversal and decoder protocol risks; template keys are validated at schema and loader boundaries and media subprocess inputs allow local file protocol only. | `api/schemas.py`, `services/{render,transcription,visual}.py` |
+| Medium | Redis increment/expiry split could create persistent rate-limit keys; both writes now execute atomically in transactions. S3 permission/outage errors no longer masquerade as missing files. | `core/ratelimit.py`, `services/{auth,storage}.py` |
+| Medium | Optional vector-extension failure rolled back mandatory baseline work; savepoint isolates it. Migration command honors unpooled URL alias. CI integration service absence now fails rather than silently skipping. | baseline migration, `scripts/migrate.py`, integration conftest, `.github/workflows/ci.yml` |
+| Medium | Aspect-ratio-dependent visual byte interpretation was incorrect. Frame output is explicitly bounded/letterboxed, sample count capped, and incomplete raw frames rejected. | `services/visual.py` |
+| Medium | Blank project names, arbitrary publishing modes and unsafe template keys reached persistence; schema validation now rejects them. Unimplemented publishing/diarization are no longer advertised as available. | `api/schemas.py`, `core/config.py` |
+| Medium | Timestamp-only pagination lost rows with identical timestamps. Composite timestamp/UUID cursors and deterministic ordering fix project/job/clip pagination while accepting old cursors. Projects UI adds a load-more control. | `db/repositories.py`, `frontend/app/projects/page.tsx` |
+| Medium | Blocked localStorage, stale concurrent session refreshes, and temporary API outages could misrepresent authentication. Safe preference helpers, refresh revision protection, retryable error UI and workspace/route state resets added. Recursive structured log redaction now follows exception formatting; broker logs omit exception text. | `frontend/lib/preference.ts`, `frontend/lib/session.tsx`, `frontend/components/Shell.tsx`, `core/logging.py`, `worker/dispatch.py` |
+
+### Latest executed verification
+
+| Check | Result | Evidence / scope |
+|---|---|---|
+| Dependency installation | PARTIAL PASS | Working local backend test/runtime subset and npm clean install. Heavy ASR/model/provider environment is not installed in full; do not treat this as a clean full requirements install. |
+| Python Ruff lint / formatting | PASS | 63 backend source/test files formatted; checks clean. |
+| Python mypy | PASS | 43 application modules. |
+| Backend unit suite | PASS | 236 passed. |
+| Combined backend unit + integration | **FAIL / PARTIALLY BLOCKED** | **308 passed, 2 failed, 61 skipped**. Both failures expect silent-input `422/no_speech_detected` but get truthful `503/asr_engine_missing`: local faster-whisper/model unavailable. Skipped speech/provider cases are not passes. |
+| New execution/media integration suite | PASS | **11 passed**, real disposable PostgreSQL 16.2, Redis 6.2.14, FFmpeg/FFprobe; includes threaded cancellation/duplicate execution, busy mutation controls, sweeper ownership, equal-timestamp pagination, custom cookie, real render/range/tenant/version tests. Controlled pipeline doubles test lifecycle races, not ASR accuracy. |
+| Auth/projects/sources API subset | PASS WITH SKIPS | 58 passed, 2 skipped in targeted execution before later execution-suite additions. These paths were also included in the combined final run. |
+| Frontend ESLint / TypeScript | PASS | Latest changes included. |
+| Frontend unit/component tests | PASS | 8 passed across 3 files; includes blocked preferences/outage/stale refresh. |
+| Frontend production build | PASS | Next 15.5.29; nine routes generated. |
+| OpenAPI | PASS | Implemented JSON regenerated (37 operations); design-contract validator reports 62 operations / 53 paths. These are different schemas, not a claim all design operations exist. |
+| npm audit | PASS | 0 known vulnerabilities, including dev dependencies in final audit. |
+| Bandit | PASS at CI severity threshold | No medium/high findings (`-ll`); full scan reports 12 low findings, not a clean penetration test. |
+| pip-audit (installed environment) | PASS after local tool maintenance | Initial audit found 21 advisories/duplicate entries in old pip/setuptools; upgrading those **local venv tools** yielded no known vulnerabilities. Heavy omitted dependencies and built container are not covered. |
+| Git whitespace | PASS | `git diff --check`. |
+| Browser E2E, Docker image/full Compose, live S3/providers | BLOCKED / NOT EXECUTED | No browser/Docker execution or external credentials/model access established here. |
+
+Local aggregate test log: `/tmp/audit-final-tests.log`; dedicated execution tests: `/tmp/audit-execution.log`; frontend build: `/tmp/audit-frontend-build.log`. These sandbox logs are ephemeral, not deliverables or committed artifacts.
+
+### Remaining work / release gates — do not certify production
+
+1. **Durable dispatch:** database job reservation and broker publish are still not one atomic outbox transaction. Delivery identity and stale-PENDING recovery reduce damage but do not guarantee automatic exactly-once delivery. A crash can require explicit operator retry. Run real broker/worker crash/redelivery and load tests, including retry-limit races.
+2. **PostgreSQL connection mode:** execution locks require **direct or session-pooled `DATABASE_URL`**, not transaction pooling. The migration-only unpooled URL does not change runtime lock connections. Each active execution reserves an additional connection; size the pool for API and worker concurrency. Test failover/connection loss before deployment.
+3. **Speech pipeline:** install supported faster-whisper and locally available model, generate the real speech fixture, rerun the two failing cases and all skipped speech/analysis/render pipeline cases. No ASR text/QA was fabricated to obtain green tests.
+4. **Missing designed workflows:** independent QA/approval/repair, publishing and analytics are not complete. They require real implementation and product acceptance, not boolean flags. Publishing and diarization availability remain false. Do not auto-approve based on successful rendering.
+5. **Operational integrity:** API rendering remains synchronous; orphan object cleanup, upload allocation/restore races, external storage compensation, resource quotas and provider timeout/recovery/load tests remain. Cancellation is cooperative at durable checkpoints, not interruption of FFmpeg/ASR.
+6. **Frontend:** jobs and project-detail lists still need complete pagination coverage, broader action/error/cancellation tests and actual responsive/accessibility/browser E2E verification. Projects load-more is implemented but has no dedicated browser regression yet.
+7. **Security/deployment:** live S3 presigner TTL/CORS, proxy trust, Redis fail-open policy, full clean locked Python environment/container dependency audit, container startup/health/migrations and secrets/TLS production configuration remain release gates. Dependencies still use broad lower bounds; installed-environment audit is not a reproducible production SBOM.
+8. **Audit coverage:** not every historical document and every service/provider/error branch has been individually verified. The remaining review is not being represented as finished merely because lint/build pass.
+
+### Reproducing the local integration checks
+
+Use dedicated disposable-test PostgreSQL admin credentials and Redis database; never production infrastructure. This sandbox cluster is SQL_ASCII, so `PGCLIENTENCODING=UTF8` is required here (a normal UTF8 cluster should be preferred). Required PostgreSQL extensions are installed; no production database was migrated.
+
+```bash
+# From repository root, after installing dev requirements and generating fixtures:
+(cd backend && PGCLIENTENCODING=UTF8 PATH="$PWD/../.cache/audit-bin:$PATH" \
+  ../.venv/bin/pytest tests/unit tests/integration -o addopts='-q')
+# For ordinary hosts put real ffmpeg/ffprobe on PATH rather than the sandbox cache.
+(cd backend && ../.venv/bin/mypy app --ignore-missing-imports)
+.venv/bin/ruff check backend/app backend/tests
+.venv/bin/ruff format --check backend/app backend/tests
+npm --prefix frontend run lint
+npm --prefix frontend run typecheck
+npm --prefix frontend test
+npm --prefix frontend run build
+npm --prefix frontend audit
+.venv/bin/bandit -r backend/app -ll
+.venv/bin/pip-audit --vulnerability-service pypi
+```
 
 ## 1. Repository overview
 

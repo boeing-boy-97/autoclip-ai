@@ -786,10 +786,11 @@ ENUMS = [
 
 def _extension_available(conn, name: str) -> bool:  # noqa: ANN001
     try:
-        conn.execute(sa.text(f"CREATE EXTENSION IF NOT EXISTS {name}"))
+        # A failed optional extension must not roll back required extensions or Alembic DDL.
+        with conn.begin_nested():
+            conn.execute(sa.text(f"CREATE EXTENSION IF NOT EXISTS {name}"))
         return True
     except Exception:  # noqa: BLE001 - optional extension
-        conn.rollback()
         return False
 
 

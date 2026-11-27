@@ -20,6 +20,8 @@ from celery.exceptions import CeleryError, OperationalError
 from kombu.exceptions import KombuError
 
 from app.core.config import Settings
+from app.db.repositories import JobRepository
+from app.db.session import session_scope
 
 logger = logging.getLogger(__name__)
 
@@ -40,6 +42,13 @@ def dispatch_analysis(
     """Enqueue `analysis.run`. Returns the Celery task id, or None when run eagerly."""
     from app.worker.tasks import run_analysis  # noqa: PLC0415 - avoids an import cycle
 
+    # Persist delivery identity before publishing. Requeue clears it so old broker deliveries
+    # cannot execute a newer attempt. Duplicate HTTP dispatches reuse the same identity.
+    with session_scope() as db:
+        job = JobRepository(db)._locked(workspace_id, job_id)
+        task_id = job.celery_task_id or uuid.uuid4().hex
+        job.celery_task_id = task_id
+
     kwargs = {
         "workspace_id": str(workspace_id),
         "project_id": str(project_id),
@@ -55,17 +64,17 @@ def dispatch_analysis(
         )
         # Eager mode sets task_eager_propagates=True, so a failing task raises here and the API
         # reports the real error. Callers must therefore be prepared for AnalysisError.
-        run_analysis.apply(kwargs=kwargs)
+        run_analysis.apply(kwargs=kwargs, task_id=task_id)
         return None
 
     try:
-        async_result = run_analysis.apply_async(kwargs=kwargs, queue="transcribe")
+        async_result = run_analysis.apply_async(kwargs=kwargs, queue="transcribe", task_id=task_id)
     except (CeleryError, KombuError, OperationalError, OSError) as exc:
         # `celery.exceptions.OperationalError` is actually a *kombu* error and is NOT a subclass
         # of CeleryError, so catching CeleryError alone let a broker outage escape as a 500.
         logger.error(
             "celery broker unavailable",
-            extra={"project_id": str(project_id), "error": f"{type(exc).__name__}: {exc}"},
+            extra={"project_id": str(project_id), "error_type": type(exc).__name__},
         )
         raise BrokerUnavailableError(
             "the task queue is unavailable; the job was recorded but not dispatched"

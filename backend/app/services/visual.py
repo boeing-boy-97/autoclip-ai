@@ -81,6 +81,8 @@ def detect_scenes(
         "-nostdin",
         "-loglevel",
         "info",
+        "-protocol_whitelist",
+        "file",
         "-i",
         str(path),
         "-vf",
@@ -144,18 +146,24 @@ def sample_frames(
     and exposure, cheap enough to run inline, and makes the sharpness values comparable across
     sources of different resolution.
     """
-    if duration_ms <= 0:
+    if duration_ms <= 0 or count <= 0:
         return []
+    count = min(count, 48)
     fps_expr = max(count / max(duration_ms / 1000, 1), 0.01)
     cmd = [
         ffmpeg_bin,
         "-nostdin",
         "-v",
         "error",
+        "-protocol_whitelist",
+        "file",
         "-i",
         str(path),
         "-vf",
-        f"fps={fps_expr:.6f},scale=320:-2,format=gray",
+        (
+            f"fps={fps_expr:.6f},scale=320:180:force_original_aspect_ratio=decrease,"
+            "pad=320:180:(ow-iw)/2:(oh-ih)/2,format=gray"
+        ),
         "-frames:v",
         str(count),
         "-f",
@@ -182,37 +190,24 @@ def sample_frames(
             "visual_analysis_failed", f"frame sampling failed: {reason[:300]}"
         )
 
-    frame_size = _frame_bytes(completed.stdout)
-    if frame_size == 0:
-        raise VisualAnalysisError("visual_analysis_failed", "could not determine frame size")
-
+    frame_size = 320 * 180
+    if len(completed.stdout) % frame_size:
+        raise VisualAnalysisError("visual_analysis_failed", "incomplete decoded frame")
     raw = np.frombuffer(completed.stdout, dtype=np.uint8)
     n_frames = raw.size // frame_size
-    # Assume 320-wide frames; height inferred from the byte count of one frame.
-    height = frame_size // 320
     samples: list[FrameSample] = []
     step = duration_ms / max(n_frames, 1)
     for i in range(n_frames):
-        frame = raw[i * frame_size : (i + 1) * frame_size].reshape(height, 320).astype(np.float32)
+        frame = raw[i * frame_size : (i + 1) * frame_size].reshape(180, 320).astype(np.float32)
         samples.append(
             FrameSample(
-                at_ms=round(i * step),
+                at_ms=round((i + 0.5) * step),
                 brightness=float(frame.mean()),
                 contrast=float(frame.std()),
                 sharpness=_laplacian_energy(frame),
             )
         )
     return samples
-
-
-def _frame_bytes(data: bytes) -> int:
-    """Infer bytes-per-frame for a 320-wide grayscale stream from the total payload."""
-    total = len(data)
-    for height in (180, 240, 320, 120, 360, 480, 96):
-        size = 320 * height
-        if total % size == 0:
-            return size
-    return 0
 
 
 def _laplacian_energy(frame):  # noqa: ANN001, ANN202

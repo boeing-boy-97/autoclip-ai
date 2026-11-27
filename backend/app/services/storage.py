@@ -202,8 +202,10 @@ class S3Storage(Storage):
         try:
             self.client.head_object(Bucket=self.bucket, Key=key)
             return True
-        except ClientError:
-            return False
+        except ClientError as exc:
+            if exc.response.get("Error", {}).get("Code") in {"404", "NoSuchKey", "NotFound"}:
+                return False
+            raise StorageError("object storage could not check file availability") from exc
 
     def size(self, key: str) -> int:
         return int(self.client.head_object(Bucket=self.bucket, Key=key)["ContentLength"])

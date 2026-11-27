@@ -1292,6 +1292,7 @@
           "name": {
             "maxLength": 200,
             "minLength": 1,
+            "pattern": "\\S",
             "title": "Name",
             "type": "string"
           },
@@ -1314,6 +1315,7 @@
           },
           "template_key": {
             "default": "podcast",
+            "pattern": "^[a-z][a-z0-9_]{0,63}$",
             "title": "Template Key",
             "type": "string"
           }
@@ -1577,6 +1579,7 @@
               {
                 "maxLength": 200,
                 "minLength": 1,
+                "pattern": "\\S",
                 "type": "string"
               },
               {
@@ -1588,6 +1591,11 @@
           "publishing_mode": {
             "anyOf": [
               {
+                "enum": [
+                  "auto",
+                  "manual_approval",
+                  "private_review"
+                ],
                 "type": "string"
               },
               {
@@ -1599,6 +1607,7 @@
           "template_key": {
             "anyOf": [
               {
+                "pattern": "^[a-z][a-z0-9_]{0,63}$",
                 "type": "string"
               },
               {
@@ -2492,22 +2501,6 @@
               ],
               "title": "X-Csrf-Token"
             }
-          },
-          {
-            "in": "cookie",
-            "name": "ac_session",
-            "required": false,
-            "schema": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "title": "Ac Session"
-            }
           }
         ],
         "responses": {
@@ -2550,22 +2543,6 @@
                 }
               ],
               "title": "Authorization"
-            }
-          },
-          {
-            "in": "cookie",
-            "name": "ac_session",
-            "required": false,
-            "schema": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "title": "Ac Session"
             }
           }
         ],
@@ -2724,22 +2701,6 @@
               ],
               "title": "Authorization"
             }
-          },
-          {
-            "in": "cookie",
-            "name": "ac_session",
-            "required": false,
-            "schema": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "title": "Ac Session"
-            }
           }
         ],
         "responses": {
@@ -2814,22 +2775,6 @@
               ],
               "title": "Authorization"
             }
-          },
-          {
-            "in": "cookie",
-            "name": "ac_session",
-            "required": false,
-            "schema": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "title": "Ac Session"
-            }
           }
         ],
         "responses": {
@@ -2899,22 +2844,6 @@
                 }
               ],
               "title": "Authorization"
-            }
-          },
-          {
-            "in": "cookie",
-            "name": "ac_session",
-            "required": false,
-            "schema": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "title": "Ac Session"
             }
           }
         ],
@@ -2986,22 +2915,6 @@
               ],
               "title": "Authorization"
             }
-          },
-          {
-            "in": "cookie",
-            "name": "ac_session",
-            "required": false,
-            "schema": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "title": "Ac Session"
-            }
           }
         ],
         "responses": {
@@ -3070,6 +2983,23 @@
             }
           },
           {
+            "in": "query",
+            "name": "version_id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "format": "uuid",
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Version Id"
+            }
+          },
+          {
             "in": "header",
             "name": "authorization",
             "required": false,
@@ -3083,22 +3013,6 @@
                 }
               ],
               "title": "Authorization"
-            }
-          },
-          {
-            "in": "cookie",
-            "name": "ac_session",
-            "required": false,
-            "schema": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "title": "Ac Session"
             }
           }
         ],
@@ -3183,22 +3097,6 @@
                 }
               ],
               "title": "Authorization"
-            }
-          },
-          {
-            "in": "cookie",
-            "name": "ac_session",
-            "required": false,
-            "schema": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "title": "Ac Session"
             }
           }
         ],
@@ -3312,22 +3210,6 @@
               ],
               "title": "Authorization"
             }
-          },
-          {
-            "in": "cookie",
-            "name": "ac_session",
-            "required": false,
-            "schema": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "title": "Ac Session"
-            }
           }
         ],
         "responses": {
@@ -3397,22 +3279,6 @@
                 }
               ],
               "title": "Authorization"
-            }
-          },
-          {
-            "in": "cookie",
-            "name": "ac_session",
-            "required": false,
-            "schema": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "title": "Ac Session"
             }
           }
         ],
@@ -3484,22 +3350,6 @@
                 }
               ],
               "title": "Authorization"
-            }
-          },
-          {
-            "in": "cookie",
-            "name": "ac_session",
-            "required": false,
-            "schema": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "title": "Ac Session"
             }
           }
         ],
@@ -3601,22 +3451,6 @@
               ],
               "title": "Authorization"
             }
-          },
-          {
-            "in": "cookie",
-            "name": "ac_session",
-            "required": false,
-            "schema": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "title": "Ac Session"
-            }
           }
         ],
         "responses": {
@@ -3676,22 +3510,6 @@
                 }
               ],
               "title": "Authorization"
-            }
-          },
-          {
-            "in": "cookie",
-            "name": "ac_session",
-            "required": false,
-            "schema": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "title": "Ac Session"
             }
           }
         ],
@@ -3831,22 +3649,6 @@
               ],
               "title": "Authorization"
             }
-          },
-          {
-            "in": "cookie",
-            "name": "ac_session",
-            "required": false,
-            "schema": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "title": "Ac Session"
-            }
           }
         ],
         "responses": {
@@ -3916,22 +3718,6 @@
               ],
               "title": "Authorization"
             }
-          },
-          {
-            "in": "cookie",
-            "name": "ac_session",
-            "required": false,
-            "schema": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "title": "Ac Session"
-            }
           }
         ],
         "responses": {
@@ -3964,7 +3750,7 @@
     },
     "/api/v1/workspaces/{workspace_id}/jobs/{job_id}/cancel": {
       "post": {
-        "description": "Mark an unfinished job cancelled.\n\nThis stops the *record* from being picked up or retried. It cannot interrupt a task already\nexecuting inside a worker process \u2014 a CPU-bound FFmpeg or ASR call is not preemptible from\nhere, and pretending otherwise would be a lie. A running task that finishes will overwrite\nthis status on its own exit path.",
+        "description": "Mark an unfinished job cancelled.\n\nAnalysis checks cancellation at durable checkpoints and before committing success. A CPU-bound\nFFmpeg/ASR call is not preempted: cancellation takes effect when that call returns. Retry is\nrefused until the old worker releases its project execution lock.",
         "operationId": "cancel_job_api_v1_workspaces__workspace_id__jobs__job_id__cancel_post",
         "parameters": [
           {
@@ -4017,22 +3803,6 @@
                 }
               ],
               "title": "Authorization"
-            }
-          },
-          {
-            "in": "cookie",
-            "name": "ac_session",
-            "required": false,
-            "schema": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "title": "Ac Session"
             }
           }
         ],
@@ -4119,22 +3889,6 @@
                 }
               ],
               "title": "Authorization"
-            }
-          },
-          {
-            "in": "cookie",
-            "name": "ac_session",
-            "required": false,
-            "schema": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "title": "Ac Session"
             }
           }
         ],
@@ -4256,22 +4010,6 @@
               ],
               "title": "Authorization"
             }
-          },
-          {
-            "in": "cookie",
-            "name": "ac_session",
-            "required": false,
-            "schema": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "title": "Ac Session"
-            }
           }
         ],
         "responses": {
@@ -4345,22 +4083,6 @@
                 }
               ],
               "title": "X-Csrf-Token"
-            }
-          },
-          {
-            "in": "cookie",
-            "name": "ac_session",
-            "required": false,
-            "schema": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "title": "Ac Session"
             }
           }
         ],
@@ -4458,22 +4180,6 @@
               ],
               "title": "X-Csrf-Token"
             }
-          },
-          {
-            "in": "cookie",
-            "name": "ac_session",
-            "required": false,
-            "schema": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "title": "Ac Session"
-            }
           }
         ],
         "responses": {
@@ -4533,22 +4239,6 @@
                 }
               ],
               "title": "Authorization"
-            }
-          },
-          {
-            "in": "cookie",
-            "name": "ac_session",
-            "required": false,
-            "schema": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "title": "Ac Session"
             }
           }
         ],
@@ -4634,22 +4324,6 @@
               ],
               "title": "X-Csrf-Token"
             }
-          },
-          {
-            "in": "cookie",
-            "name": "ac_session",
-            "required": false,
-            "schema": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "title": "Ac Session"
-            }
           }
         ],
         "requestBody": {
@@ -4728,22 +4402,6 @@
                 }
               ],
               "title": "Authorization"
-            }
-          },
-          {
-            "in": "cookie",
-            "name": "ac_session",
-            "required": false,
-            "schema": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "title": "Ac Session"
             }
           }
         ],
@@ -4842,22 +4500,6 @@
                 }
               ],
               "title": "Authorization"
-            }
-          },
-          {
-            "in": "cookie",
-            "name": "ac_session",
-            "required": false,
-            "schema": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "title": "Ac Session"
             }
           }
         ],
@@ -4988,22 +4630,6 @@
               ],
               "title": "Authorization"
             }
-          },
-          {
-            "in": "cookie",
-            "name": "ac_session",
-            "required": false,
-            "schema": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "title": "Ac Session"
-            }
           }
         ],
         "responses": {
@@ -5089,22 +4715,6 @@
                 }
               ],
               "title": "Authorization"
-            }
-          },
-          {
-            "in": "cookie",
-            "name": "ac_session",
-            "required": false,
-            "schema": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "title": "Ac Session"
             }
           }
         ],
@@ -5224,22 +4834,6 @@
               ],
               "title": "Authorization"
             }
-          },
-          {
-            "in": "cookie",
-            "name": "ac_session",
-            "required": false,
-            "schema": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "title": "Ac Session"
-            }
           }
         ],
         "responses": {
@@ -5308,22 +4902,6 @@
                 }
               ],
               "title": "Authorization"
-            }
-          },
-          {
-            "in": "cookie",
-            "name": "ac_session",
-            "required": false,
-            "schema": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "title": "Ac Session"
             }
           }
         ],
@@ -5412,22 +4990,6 @@
                 }
               ],
               "title": "Authorization"
-            }
-          },
-          {
-            "in": "cookie",
-            "name": "ac_session",
-            "required": false,
-            "schema": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "title": "Ac Session"
             }
           }
         ],
@@ -5518,22 +5080,6 @@
               ],
               "title": "Authorization"
             }
-          },
-          {
-            "in": "cookie",
-            "name": "ac_session",
-            "required": false,
-            "schema": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "title": "Ac Session"
-            }
           }
         ],
         "responses": {
@@ -5603,22 +5149,6 @@
                 }
               ],
               "title": "Authorization"
-            }
-          },
-          {
-            "in": "cookie",
-            "name": "ac_session",
-            "required": false,
-            "schema": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "title": "Ac Session"
             }
           }
         ],
@@ -5702,22 +5232,6 @@
                 }
               ],
               "title": "Authorization"
-            }
-          },
-          {
-            "in": "cookie",
-            "name": "ac_session",
-            "required": false,
-            "schema": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "title": "Ac Session"
             }
           }
         ],

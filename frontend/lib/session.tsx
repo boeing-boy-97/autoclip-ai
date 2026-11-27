@@ -7,15 +7,18 @@ import {
   useContext,
   useEffect,
   useMemo,
+  useRef,
   useState,
   type ReactNode,
 } from "react";
 
 import { ApiError, api, setCsrfToken } from "./api";
+import { readPreference, writePreference } from "./preference";
 import type { Session, WorkspaceSummary } from "./types";
 
 type SessionState = {
-  status: "loading" | "anonymous" | "authenticated";
+  status: "loading" | "anonymous" | "authenticated" | "error";
+  error: string | null;
   user: Session["user"] | null;
   workspace: WorkspaceSummary | null;
   workspaces: WorkspaceSummary[];
@@ -37,6 +40,8 @@ const WORKSPACE_KEY = "autoclip.workspace";
 export function SessionProvider({ children }: { children: ReactNode }) {
   const router = useRouter();
   const [status, setStatus] = useState<SessionState["status"]>("loading");
+  const [error, setError] = useState<string | null>(null);
+  const revision = useRef(0);
   const [user, setUser] = useState<Session["user"] | null>(null);
   const [workspaceId, setWorkspaceId] = useState<string | null>(null);
 
@@ -44,24 +49,28 @@ export function SessionProvider({ children }: { children: ReactNode }) {
   const workspace = workspaces.find((w) => w.id === workspaceId) ?? workspaces[0] ?? null;
 
   const refresh = useCallback(async () => {
+    const requestRevision = ++revision.current;
+    setError(null);
     try {
       // `/auth/me` returns the user, not a session envelope: the CSRF token is re-published as a
       // readable cookie by the same response, so it is read from there rather than from a body.
       const user = await api<Session["user"]>("/api/v1/auth/me");
+      if (requestRevision !== revision.current) return;
       setUser(user);
       setStatus("authenticated");
-      const remembered =
-        typeof window === "undefined" ? null : window.localStorage.getItem(WORKSPACE_KEY);
+      const remembered = readPreference(WORKSPACE_KEY);
       const valid = user.workspaces.some((w) => w.id === remembered);
       setWorkspaceId(valid ? remembered : (user.workspaces[0]?.id ?? null));
     } catch (error) {
-      // 401 here is the ordinary logged-out case, not a failure to report.
-      if (!(error instanceof ApiError) || error.status !== 401) {
-        console.error("session refresh failed", error);
+      if (requestRevision !== revision.current) return;
+      if (error instanceof ApiError && error.status === 401) {
+        setCsrfToken(null);
+        setUser(null);
+        setStatus("anonymous");
+      } else {
+        setError("Could not verify your session. Check your connection and try again.");
+        setStatus("error");
       }
-      setCsrfToken(null);
-      setUser(null);
-      setStatus("anonymous");
     }
   }, []);
 
@@ -71,6 +80,7 @@ export function SessionProvider({ children }: { children: ReactNode }) {
 
   const login = useCallback(
     async (email: string, password: string) => {
+      ++revision.current;
       const session = await api<Session>("/api/v1/auth/login", {
         method: "POST",
         body: { email, password },
@@ -91,6 +101,7 @@ export function SessionProvider({ children }: { children: ReactNode }) {
       display_name: string;
       workspace_name: string;
     }) => {
+      ++revision.current;
       const session = await api<Session>("/api/v1/auth/register", {
         method: "POST",
         body: input,
@@ -105,7 +116,9 @@ export function SessionProvider({ children }: { children: ReactNode }) {
   );
 
   const logout = useCallback(async () => {
-    await api("/api/v1/auth/logout", { method: "POST" });
+    ++revision.current;
+    try { await api("/api/v1/auth/logout", { method: "POST" }); }
+    catch (error) { if (!(error instanceof ApiError) || error.status !== 401) throw error; }
     setCsrfToken(null);
     setUser(null);
     setStatus("anonymous");
@@ -113,13 +126,14 @@ export function SessionProvider({ children }: { children: ReactNode }) {
   }, [router]);
 
   const selectWorkspace = useCallback((id: string) => {
-    window.localStorage.setItem(WORKSPACE_KEY, id);
+    writePreference(WORKSPACE_KEY, id);
     setWorkspaceId(id);
   }, []);
 
   const value = useMemo<SessionState>(
     () => ({
       status,
+      error,
       user,
       workspace,
       workspaces,
@@ -129,7 +143,7 @@ export function SessionProvider({ children }: { children: ReactNode }) {
       selectWorkspace,
       refresh,
     }),
-    [status, user, workspace, workspaces, login, register, logout, selectWorkspace, refresh],
+    [status, error, user, workspace, workspaces, login, register, logout, selectWorkspace, refresh],
   );
 
   return <SessionContext.Provider value={value}>{children}</SessionContext.Provider>;

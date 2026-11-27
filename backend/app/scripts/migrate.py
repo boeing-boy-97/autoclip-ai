@@ -56,7 +56,7 @@ def _database_url() -> str:
     environment first means a missing REDIS_URL or S3 bucket fails the *web* deploy, with a
     message about that, instead of failing here as a confusing migration error.
     """
-    for name in ("DATABASE_URL_MIGRATIONS", "DATABASE_URL"):
+    for name in ("DATABASE_URL_MIGRATIONS", "DATABASE_URL_UNPOOLED", "DATABASE_URL"):
         value = os.environ.get(name)
         if value:
             return value

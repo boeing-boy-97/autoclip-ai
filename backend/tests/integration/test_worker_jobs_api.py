@@ -355,4 +355,4 @@ class TestBrokerUnavailable:
         # The work must still be discoverable and retryable once the broker returns.
         pending = jobs(alice, project_id=project_id)
         assert len(pending) == 1
-        assert pending[0]["status"] == "PENDING"
+        assert pending[0]["status"] == "FAILED"

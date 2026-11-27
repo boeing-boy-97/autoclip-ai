@@ -361,7 +361,7 @@ class Settings(BaseSettings):
                 "missing_env": []
                 if self.youtube_configured
                 else ["YOUTUBE_CLIENT_ID", "YOUTUBE_CLIENT_SECRET"],
-                "publishing_available": self.youtube_configured,
+                "publishing_available": False,
             },
             "ai_provider": {
                 "configured": self.ai_configured,
@@ -372,7 +372,7 @@ class Settings(BaseSettings):
             "asr": {
                 "configured": True,  # local faster-whisper needs no credentials
                 "provider": self.asr_provider,
-                "diarization_configured": bool(self.hf_token),
+                "diarization_configured": False,
             },
             "storage": {
                 "configured": self.storage_configured,

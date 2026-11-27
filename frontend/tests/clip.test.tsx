@@ -21,10 +21,10 @@ describe("rendered clip", () => {
     } as Clip;
     const { container } = render(<ClipCard clip={clip} workspaceId="ws1" onChange={vi.fn()} />);
     await waitFor(() => expect(container.querySelector("video")).toHaveAttribute(
-      "src", "/api/v1/workspaces/ws1/clips/clip1/media?v=v1",
+      "src", "/api/v1/workspaces/ws1/clips/clip1/media?version_id=v1",
     ));
     expect(screen.getByRole("link", { name: "Download MP4" })).toHaveAttribute(
-      "href", "/api/v1/workspaces/ws1/clips/clip1/media?download=true",
+      "href", "/api/v1/workspaces/ws1/clips/clip1/media?download=true&version_id=v1",
     );
   });
 });
