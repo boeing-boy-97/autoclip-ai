@@ -1,8 +1,11 @@
+import { fileURLToPath } from "node:url";
+
 /** @type {import('next').NextConfig} */
 const API_INTERNAL_URL = process.env.API_INTERNAL_URL ?? "http://127.0.0.1:8000";
 
 const nextConfig = {
   reactStrictMode: true,
+  outputFileTracingRoot: fileURLToPath(new URL(".", import.meta.url)),
   // Required by frontend/Dockerfile: the runner stage copies .next/standalone, which Next only
   // emits when standalone output is enabled. Without this the image builds an empty server.
   output: "standalone",

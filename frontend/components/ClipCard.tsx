@@ -45,7 +45,9 @@ export function ClipCard({ clip, workspaceId, onChange }: Props) {
   }, [base, clip.current_version_id]);
 
   useEffect(() => {
-    void load();
+    void load().catch((err) =>
+      setError(err instanceof ApiError ? err.detail : "Could not load clip details."),
+    );
   }, [load]);
 
   async function act(label: string, fn: () => Promise<unknown>) {
@@ -100,20 +102,16 @@ export function ClipCard({ clip, workspaceId, onChange }: Props) {
       <div className="clip-preview">
         <div style={{ flex: "none" }}>
           {current ? (
-            <div className="clip-frame" style={{ display: "grid", placeItems: "center", padding: 14 }}>
-              <div style={{ textAlign: "center" }}>
-                <div className="mono dim" style={{ marginBottom: 6 }}>
-                  {current.width}×{current.height}
-                </div>
-                <div className="faint" style={{ marginBottom: 10 }}>
-                  version {current.version_no} · {fmtBytes(current.bytes)}
-                </div>
-                <div className="hint">
-                  The rendered file is on the storage backend. This preview has no signed URL under
-                  local storage, so it is described rather than shown.
-                </div>
-              </div>
-            </div>
+            <video
+              key={clip.current_version_id}
+              className="clip-frame"
+              style={{ width: 270 }}
+              controls
+              playsInline
+              preload="metadata"
+              src={`${base}/media?v=${clip.current_version_id}`}
+              aria-label={`Preview of ${clip.title}`}
+            />
           ) : (
             <div className="clip-frame" style={{ display: "grid", placeItems: "center" }}>
               <span className="faint">Not rendered</span>
@@ -172,6 +170,11 @@ export function ClipCard({ clip, workspaceId, onChange }: Props) {
           )}
 
           <div className="row wrap" style={{ gap: 8 }}>
+            {current && (
+              <a className="btn btn-sm" href={`${base}/media?download=true`}>
+                Download MP4
+              </a>
+            )}
             {renderable && (
               <button
                 className="btn btn-primary btn-sm"
@@ -194,7 +197,7 @@ export function ClipCard({ clip, workspaceId, onChange }: Props) {
               </button>
             )}
 
-            {clip.state === "QA_PASSED" && !rejecting && (
+            {["QA_PASSED", "AWAITING_REVIEW"].includes(clip.state) && !rejecting && (
               <button className="btn btn-sm btn-danger" onClick={() => setRejecting(true)}>
                 Reject
               </button>

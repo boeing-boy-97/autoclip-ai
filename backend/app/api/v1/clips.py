@@ -11,6 +11,7 @@ import uuid
 from typing import Annotated
 
 from fastapi import APIRouter, Depends, Query, status
+from fastapi.responses import FileResponse, RedirectResponse
 from sqlalchemy import select
 
 from app.api.deps import (
@@ -48,7 +49,7 @@ from app.db.repositories import ClipRepository, NotFoundError
 from app.services.captions import build_track, to_webvtt
 from app.services.clips import ClipError, ClipService
 from app.services.render import Template
-from app.services.storage import get_storage
+from app.services.storage import LocalStorage, get_storage
 
 router = APIRouter(tags=["Clips"])
 
@@ -152,12 +153,11 @@ def list_project_clips(
         workspace_id=workspace_id,
         project_id=project_id,
         state=state,
+        publishable=publishable,
         limit=limit,
         cursor=cursor,
     )
     items = [ClipOut.model_validate(c) for c in page.items]
-    if publishable is not None:
-        items = [c for c in items if c.publishable is publishable]
     return ClipPage(items=items, next_cursor=page.next_cursor)
 
 
@@ -345,12 +345,7 @@ def download_clip(
     db: DbDep,
     ctx: WorkspaceViewer,  # noqa: ARG001
 ) -> dict:
-    """Where the rendered file lives.
-
-    The local storage backend cannot mint a signed URL and does not pretend to; it returns the
-    storage key so the caller knows exactly what exists. A real URL only appears once an
-    S3-compatible backend is configured.
-    """
+    """Return metadata and an authenticated media URL for the current render."""
     clip = _clip(db, workspace_id, clip_id)
     if clip.current_version_id is None:
         raise ApiError("clip_not_rendered", "this clip has not been rendered yet", status_code=409)
@@ -368,8 +363,7 @@ def download_clip(
         "width": asset.width,
         "height": asset.height,
         "duration_ms": asset.duration_ms,
-        "download_url": None,
-        "note": "local storage backend: no signed URL is available; fetch the storage key directly",
+        "download_url": f"/api/v1/workspaces/{workspace_id}/clips/{clip_id}/media?download=true",
     }
 
 
@@ -377,6 +371,7 @@ def download_clip(
     "/workspaces/{workspace_id}/clips/{clip_id}/reject",
     response_model=ClipOut,
     summary="Reject Clip",
+    dependencies=[Depends(require_csrf)],
 )
 def reject_clip(
     workspace_id: uuid.UUID,
@@ -410,6 +405,7 @@ def reject_clip(
     "/workspaces/{workspace_id}/clips/{clip_id}/versions/{version_id}/restore",
     response_model=ClipRestoreOut,
     summary="Restore Clip Version",
+    dependencies=[Depends(require_csrf)],
 )
 def restore_clip_version(
     workspace_id: uuid.UUID,
@@ -441,3 +437,43 @@ def restore_clip_version(
         restored_version_id=version_id,
         previous_version_id=previous,
     )
+
+
+@router.get("/workspaces/{workspace_id}/clips/{clip_id}/media", response_model=None)
+def clip_media(
+    workspace_id: uuid.UUID,
+    clip_id: uuid.UUID,
+    db: DbDep,
+    ctx: WorkspaceViewer,  # noqa: ARG001 - authorization by declaration
+    download: bool = False,
+) -> FileResponse | RedirectResponse:
+    """Authorize every media request; support local byte ranges or short-lived S3 URLs."""
+    clip = _clip(db, workspace_id, clip_id)
+    version = db.get(ClipVersion, clip.current_version_id) if clip.current_version_id else None
+    asset = (
+        db.get(MediaAsset, version.video_asset_id) if version and version.video_asset_id else None
+    )
+    if asset is None or asset.workspace_id != workspace_id:
+        raise ApiError("clip_not_rendered", "the rendered file is missing", status_code=404)
+    settings = get_settings()
+    storage = get_storage(settings)
+    assert version is not None
+    filename = f"clip-{clip_id}-v{version.version_no}.mp4"
+    headers = {"Cache-Control": "private, no-store"}
+    if isinstance(storage, LocalStorage):
+        path = storage._path(asset.storage_key)
+        if not path.is_file():
+            raise ApiError("media_not_found", "the rendered file is missing", status_code=404)
+        return FileResponse(
+            path,
+            media_type="video/mp4",
+            filename=filename,
+            content_disposition_type="attachment" if download else "inline",
+            headers=headers,
+        )
+    url = storage.signed_url(
+        asset.storage_key,
+        expires_in=settings.signed_url_ttl_seconds,
+        download_name=filename if download else None,
+    )
+    return RedirectResponse(url, status_code=307, headers=headers)

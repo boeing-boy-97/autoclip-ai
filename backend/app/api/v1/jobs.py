@@ -29,7 +29,7 @@ from app.api.deps import (
 from app.api.schemas import JobOut, JobPage
 from app.core.config import get_settings
 from app.db.repositories import ConflictError, JobRepository, NotFoundError, ProcessingJob
-from app.worker.dispatch import dispatch_analysis
+from app.worker.dispatch import BrokerUnavailableError, dispatch_analysis
 
 router = APIRouter(prefix="/workspaces/{workspace_id}/jobs", tags=["Jobs"])
 
@@ -165,14 +165,27 @@ def retry_job(
     # looks like it did nothing.
     project_id = job.project_id
     assert project_id is not None  # a retryable analysis job always belongs to a project
-    task_id = dispatch_analysis(
-        get_settings(),
-        workspace_id=workspace_id,
-        project_id=project_id,
-        user_id=ctx.user.id,
-        job_id=job_id,
-        force=True,
-    )
+    try:
+        task_id = dispatch_analysis(
+            get_settings(),
+            workspace_id=workspace_id,
+            project_id=project_id,
+            user_id=ctx.user.id,
+            job_id=job_id,
+            force=True,
+        )
+    except BrokerUnavailableError as exc:
+        jobs.mark_failed(
+            workspace_id=workspace_id,
+            job_id=job_id,
+            code="broker_unavailable",
+            detail="the task queue is unavailable",
+            retryable=True,
+        )
+        db.commit()
+        raise ApiError(
+            "broker_unavailable", "the task queue is unavailable", status_code=503
+        ) from exc
     if task_id is not None:
         job = jobs.get(workspace_id=workspace_id, job_id=job_id)
         job.celery_task_id = task_id

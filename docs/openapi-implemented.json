@@ -2948,7 +2948,7 @@
     },
     "/api/v1/workspaces/{workspace_id}/clips/{clip_id}/download": {
       "get": {
-        "description": "Where the rendered file lives.\n\nThe local storage backend cannot mint a signed URL and does not pretend to; it returns the\nstorage key so the caller knows exactly what exists. A real URL only appears once an\nS3-compatible backend is configured.",
+        "description": "Return metadata and an authenticated media URL for the current render.",
         "operationId": "download_clip_api_v1_workspaces__workspace_id__clips__clip_id__download_get",
         "parameters": [
           {
@@ -3034,6 +3034,100 @@
         ]
       }
     },
+    "/api/v1/workspaces/{workspace_id}/clips/{clip_id}/media": {
+      "get": {
+        "description": "Authorize every media request; support local byte ranges or short-lived S3 URLs.",
+        "operationId": "clip_media_api_v1_workspaces__workspace_id__clips__clip_id__media_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "workspace_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Workspace Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "clip_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Clip Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "download",
+            "required": false,
+            "schema": {
+              "default": false,
+              "title": "Download",
+              "type": "boolean"
+            }
+          },
+          {
+            "in": "header",
+            "name": "authorization",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Authorization"
+            }
+          },
+          {
+            "in": "cookie",
+            "name": "ac_session",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Ac Session"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Clip Media",
+        "tags": [
+          "Clips"
+        ]
+      }
+    },
     "/api/v1/workspaces/{workspace_id}/clips/{clip_id}/reject": {
       "post": {
         "description": "Refuse a rendered clip, with a reason, and allow it to be rendered again.\n\nRejecting is the only way a reviewed clip becomes re-renderable. That is deliberate: an\napproved or simply unreviewed file is never overwritten, so the version a person judged is\nalways still there afterwards.",
@@ -3057,6 +3151,22 @@
               "format": "uuid",
               "title": "Clip Id",
               "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "x-csrf-token",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Csrf-Token"
             }
           },
           {
@@ -3458,6 +3568,22 @@
               "format": "uuid",
               "title": "Version Id",
               "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "x-csrf-token",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Csrf-Token"
             }
           },
           {

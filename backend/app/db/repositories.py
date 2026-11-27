@@ -723,6 +723,7 @@ class ClipRepository:
         workspace_id: uuid.UUID,
         project_id: uuid.UUID,
         state: str | None = None,
+        publishable: bool | None = None,
         limit: int = 50,
         cursor: str | None = None,
     ) -> Page:
@@ -738,6 +739,8 @@ class ClipRepository:
         )
         if state:
             stmt = stmt.where(Clip.state == state)
+        if publishable is not None:
+            stmt = stmt.where(Clip.publishable.is_(publishable))
         if cursor:
             stmt = stmt.where(Clip.created_at > _decode_cursor(cursor))
         rows = list(self.db.scalars(stmt.order_by(Clip.created_at.asc()).limit(limit + 1)))

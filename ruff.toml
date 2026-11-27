@@ -6,7 +6,6 @@ target-version = "py312"
 select = ["E", "F", "W", "I", "N", "UP", "B", "S", "A", "C4", "DTZ", "T20", "PT", "RET",
           "SIM", "TID", "ARG", "PL", "RUF", "BLE", "ANN", "ISC", "PTH", "TCH"]
 ignore = [
-  "ANN101", "ANN102",  # self/cls annotations
   "ANN401",            # Any is appropriate at provider boundaries
   "PLR0913", "PLR0917",  # FastAPI handlers legitimately take many parameters
   "PLR0915", "PLR0912",# long setup functions (app factory, health probes)

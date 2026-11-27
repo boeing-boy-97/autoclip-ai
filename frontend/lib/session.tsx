@@ -40,7 +40,7 @@ export function SessionProvider({ children }: { children: ReactNode }) {
   const [user, setUser] = useState<Session["user"] | null>(null);
   const [workspaceId, setWorkspaceId] = useState<string | null>(null);
 
-  const workspaces = user?.workspaces ?? [];
+  const workspaces = useMemo(() => user?.workspaces ?? [], [user]);
   const workspace = workspaces.find((w) => w.id === workspaceId) ?? workspaces[0] ?? null;
 
   const refresh = useCallback(async () => {
@@ -105,11 +105,7 @@ export function SessionProvider({ children }: { children: ReactNode }) {
   );
 
   const logout = useCallback(async () => {
-    try {
-      await api("/api/v1/auth/logout", { method: "POST" });
-    } catch {
-      // A failed logout still clears local state; the cookie expiry is the backstop.
-    }
+    await api("/api/v1/auth/logout", { method: "POST" });
     setCsrfToken(null);
     setUser(null);
     setStatus("anonymous");

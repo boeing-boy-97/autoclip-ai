@@ -152,6 +152,8 @@ def create_app() -> FastAPI:
         """Cheap, unconditional hardening. None of these change API behaviour."""
         response = await call_next(request)
         response.headers.setdefault("X-Content-Type-Options", "nosniff")
+        # Session and tenant responses must not be retained by shared/browser caches.
+        response.headers.setdefault("Cache-Control", "private, no-store")
         response.headers.setdefault("X-Frame-Options", "DENY")
         response.headers.setdefault("Referrer-Policy", "no-referrer")
         response.headers.setdefault("Cross-Origin-Opener-Policy", "same-origin")
@@ -164,7 +166,12 @@ def create_app() -> FastAPI:
 
     @app.middleware("http")
     async def trace_and_log(request: Request, call_next: Any) -> Any:
-        trace_id = request.headers.get("X-Trace-Id") or uuid.uuid4().hex
+        supplied_trace = request.headers.get("X-Trace-Id", "")
+        trace_id = (
+            supplied_trace
+            if re.fullmatch(r"[A-Za-z0-9_-]{1,128}", supplied_trace)
+            else uuid.uuid4().hex
+        )
         # Identifiers are redacted before anything is logged or bound into the log context: a
         # project or clip id in a log line is a tenant-scoped identifier, not a route.
         route = _redact_path(request.url.path)
@@ -203,13 +210,17 @@ def create_app() -> FastAPI:
         which silently breaks every documented error contract the frontend relies on.
         """
         code, title = http_code_map.get(exc.status_code, ("http_error", "Request failed"))
-        return problem(
+        response = problem(
             status_code=exc.status_code,
             code=code,
             title=title,
             detail=str(exc.detail) if exc.detail and exc.status_code != 404 else None,
             trace_id=getattr(request.state, "trace_id", None) or request.headers.get("X-Trace-Id"),
         )
+
+        if exc.headers:
+            response.headers.update(exc.headers)
+        return response
 
     @app.exception_handler(RequestValidationError)
     async def _validation_handler(request: Request, exc: RequestValidationError) -> JSONResponse:
@@ -232,7 +243,7 @@ def create_app() -> FastAPI:
 
     @app.exception_handler(Exception)
     async def _unhandled(request: Request, _exc: Exception) -> JSONResponse:
-        get_logger(__name__).exception("http.unhandled_error", route=request.url.path)
+        get_logger(__name__).exception("http.unhandled_error", route=_redact_path(request.url.path))
         # Internal detail is withheld; trace_id lets support correlate.
         return problem(
             status_code=500,
