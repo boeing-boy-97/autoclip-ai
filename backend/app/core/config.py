@@ -135,7 +135,7 @@ class Settings(BaseSettings):
     # Path to the scoring weights. Resolved against the repository root first, then the process
     # working directory, so the API, a Celery worker and a test run all find the same file.
     scoring_config_path: str = "config/scoring.yaml"
-    tmp_root: str = "/tmp/autoclip"  # noqa: S108 - per-job scratch dir, cleaned in finally
+    tmp_root: str = "/tmp/autoclip"  # noqa: S108  # nosec B108 - per-job scratch, cleaned up
     render_target_width: int = 1080
     render_target_height: int = 1920
     max_source_duration_minutes: int = 360

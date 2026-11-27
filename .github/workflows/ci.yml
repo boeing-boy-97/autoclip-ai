@@ -64,16 +64,38 @@ jobs:
       - run: pip install -r backend/requirements-dev.txt pyyaml
       - name: OpenAPI contract checks
         run: python3 ops/scripts/validate_openapi.py
+      # Failures here are annotated with the first SQL error, so a red check is readable from the
+      # PR page instead of sending people to the raw log.
       - name: Schema applies and invariants hold
         env:
           PGHOST: localhost
           PGUSER: postgres
           PGPASSWORD: postgres
         run: |
-          psql -c "CREATE EXTENSION IF NOT EXISTS citext; CREATE EXTENSION IF NOT EXISTS vector;" -d autoclip_test
-          psql -v ON_ERROR_STOP=1 -d autoclip_test -f docs/database/schema.sql > /dev/null
-          psql -d autoclip_test -f docs/database/verify_invariants.sql | tee /tmp/inv.log
-          ! grep -q 'FAIL:' /tmp/inv.log
+          set -uo pipefail
+          psql --version
+
+          psql -d autoclip_test -c "CREATE EXTENSION IF NOT EXISTS citext; CREATE EXTENSION IF NOT EXISTS vector;"
+
+          if ! psql -v ON_ERROR_STOP=1 -d autoclip_test -f docs/database/schema.sql > /tmp/schema.log 2>&1; then
+            echo "::error title=schema.sql does not apply::$(grep -m1 -E 'ERROR|FATAL' /tmp/schema.log | cut -c1-400)"
+            grep -nE 'ERROR|FATAL' /tmp/schema.log | head -5
+            tail -20 /tmp/schema.log
+            exit 1
+          fi
+
+          psql -d autoclip_test -f docs/database/verify_invariants.sql > /tmp/inv.log 2>/tmp/inv.err
+          grep -E 'PASS:|FAIL:' /tmp/inv.log
+
+          if grep -q 'FAIL:' /tmp/inv.log; then
+            echo "::error title=schema invariants failed::$(grep -m1 'FAIL:' /tmp/inv.log | cut -c1-400)"
+            exit 1
+          fi
+          if grep -qE 'ERROR|FATAL' /tmp/inv.err; then
+            echo "::error title=verify_invariants.sql raised SQL errors::$(grep -m1 -E 'ERROR|FATAL' /tmp/inv.err | cut -c1-400)"
+            head -20 /tmp/inv.err
+            exit 1
+          fi
           grep -q 'PASS:' /tmp/inv.log
       - name: Config file validity
         run: python3 ops/scripts/phase0_verify.sh
