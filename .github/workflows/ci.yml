@@ -34,9 +34,16 @@ jobs:
         run: mypy app/ --ignore-missing-imports
       - name: bandit
         run: bandit -r backend/app -ll -x backend/tests
+      - name: Generate a development .env (compose reads env_file: [.env])
+        run: ./ops/scripts/dev_env.sh
       - name: Compose file is valid and uses the real worker module
         run: |
-          docker compose config --quiet
+          set +e
+          docker compose config --quiet 2>&1 | tee /tmp/compose.log
+          if [ "${PIPESTATUS[0]}" -ne 0 ]; then
+            echo "::error title=docker compose rejected docker-compose.yml::$(grep -m1 -iE 'error|invalid' /tmp/compose.log | cut -c1-400)"
+            exit 1
+          fi
           # The workers used to reference app.workers (plural), which does not exist.
           ! grep -q "app.workers" docker-compose.yml
 
@@ -72,10 +79,16 @@ jobs:
           PGUSER: postgres
           PGPASSWORD: postgres
         run: |
-          set -uo pipefail
+          set +e
           psql --version
+          pg_isready -d autoclip_test
 
-          psql -d autoclip_test -c "CREATE EXTENSION IF NOT EXISTS citext; CREATE EXTENSION IF NOT EXISTS vector;"
+          if ! psql -d autoclip_test -c "CREATE EXTENSION IF NOT EXISTS citext; CREATE EXTENSION IF NOT EXISTS vector;" > /tmp/ext.log 2>&1; then
+            echo "::error title=required extensions are unavailable::$(grep -m1 -E 'ERROR|FATAL' /tmp/ext.log | cut -c1-400)"
+            cat /tmp/ext.log
+            psql -d autoclip_test -c "SELECT name FROM pg_available_extensions WHERE name IN ('citext','vector','pgcrypto','pg_trgm')"
+            exit 1
+          fi
 
           if ! psql -v ON_ERROR_STOP=1 -d autoclip_test -f docs/database/schema.sql > /tmp/schema.log 2>&1; then
             echo "::error title=schema.sql does not apply::$(grep -m1 -E 'ERROR|FATAL' /tmp/schema.log | cut -c1-400)"
