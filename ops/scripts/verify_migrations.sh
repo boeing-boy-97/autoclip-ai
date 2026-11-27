@@ -34,7 +34,11 @@ fi
 
 log() { printf '\033[1m▶ %s\033[0m\n' "$1"; }
 ok()  { printf '  \033[32m✓ %s\033[0m\n' "$1"; }
-bad() { printf '  \033[31m✗ %s\033[0m\n' "$1"; }
+bad() {
+  printf '  \033[31m✗ %s\033[0m\n' "$1"
+  # Also annotate, so a failure is readable from the PR page and not only the job log.
+  echo "::error title=drift: $1::${2:-$1}"
+}
 
 log "creating two empty databases"
 # The migration runs as an ordinary role, not the superuser, so it has to exist.
