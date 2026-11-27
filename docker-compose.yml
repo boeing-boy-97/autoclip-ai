@@ -1,9 +1,13 @@
 # =====================================================================================
 # AutoClipper AI — local development stack
+#   ./ops/scripts/dev_env.sh      # creates .env with real secrets (once)
 #   docker compose up --build
 #
-# Services: postgres, redis, minio (S3-compatible), api, web, and one container per
-# Celery queue so concurrency is independently tunable (see .env.example).
+# Services: postgres, redis, minio (S3-compatible), api, web, one container per Celery
+# queue that actually has a consumer (media, transcribe, analyze) and a single beat.
+#
+# Infrastructure ports are bound to 127.0.0.1: this stack is for a developer's machine, not
+# for a shared host. Only the API (8000) and the web app (3000) are reachable from outside.
 # =====================================================================================
 name: autoclip
 
@@ -44,6 +48,8 @@ x-worker: &worker
     postgres: {condition: service_healthy}
     redis: {condition: service_healthy}
   restart: unless-stopped
+  # Workers and beat expose no HTTP port, so the image's readiness probe does not apply to them.
+  healthcheck: {disable: true}
 
 services:
   postgres:
@@ -53,7 +59,7 @@ services:
       POSTGRES_PASSWORD: autoclip
       POSTGRES_DB: autoclip
       POSTGRES_INITDB_ARGS: "--data-checksums"
-    ports: ["5432:5432"]
+    ports: ["127.0.0.1:5432:5432"]
     volumes: [pgdata:/var/lib/postgresql/data]
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U autoclip -d autoclip"]
@@ -66,7 +72,7 @@ services:
 
   redis:
     image: redis:8-alpine
-    ports: ["6379:6379"]
+    ports: ["127.0.0.1:6379:6379"]
     volumes: [redisdata:/data]
     command: redis-server --appendonly yes --maxmemory 512mb --maxmemory-policy allkeys-lru
     healthcheck:
@@ -76,12 +82,13 @@ services:
       retries: 20
 
   minio:
-    image: minio/minio:latest
+    # Pin the tag for reproducibility: `latest` changes object-store behaviour between builds.
+    image: ${MINIO_IMAGE:-quay.io/minio/minio:RELEASE.2025-04-22T22-12-26Z}
     command: server /data --console-address ":9001"
     environment:
       MINIO_ROOT_USER: ${S3_ACCESS_KEY_ID:-autoclip}
       MINIO_ROOT_PASSWORD: ${S3_SECRET_ACCESS_KEY:-autoclip123}
-    ports: ["9000:9000", "9001:9001"]
+    ports: ["127.0.0.1:9000:9000", "127.0.0.1:9001:9001"]
     volumes: [miniodata:/data]
     healthcheck:
       test: ["CMD", "mc", "ready", "local"]
@@ -90,7 +97,7 @@ services:
       retries: 10
 
   minio-init:
-    image: minio/mc:latest
+    image: quay.io/minio/mc:RELEASE.2025-04-16T18-13-26Z
     depends_on:
       minio: {condition: service_healthy}
     entrypoint: >
@@ -125,45 +132,37 @@ services:
       redis: {condition: service_healthy}
       minio-init: {condition: service_completed_successfully}
     healthcheck:
-      test: ["CMD", "curl", "-fsS", "http://localhost:8000/api/v1/health/livez"]
+      # readyz, not livez: the API is only useful when the database, Redis, storage and FFmpeg
+      # all answer. livez is always 200 and would report a broken deployment as healthy.
+      test: ["CMD", "curl", "-fsS", "http://localhost:8000/api/v1/health/readyz"]
       interval: 15s
       timeout: 5s
       retries: 10
       start_period: 40s
 
-  # --- one worker per queue: concurrency stays independently tunable -------------
+  # --- one worker per queue that has a consumer ----------------------------------
+  # Queues without a task (render, qa, publish, analytics) deliberately have no worker: a
+  # container that can never receive work is a false claim of capability.
   worker-media:
     <<: *worker
-    command: celery -A app.workers.celery_app worker -Q media -c ${WORKER_CONCURRENCY_MEDIA:-2} -n media@%h --max-tasks-per-child=50 --loglevel=INFO
+    command: celery -A app.worker.celery_app worker -Q media -c ${WORKER_CONCURRENCY_MEDIA:-2} -n media@%h --max-tasks-per-child=50 --loglevel=INFO
 
   worker-transcribe:
     <<: *worker
-    command: celery -A app.workers.celery_app worker -Q transcribe -c ${WORKER_CONCURRENCY_TRANSCRIBE:-1} -n transcribe@%h --max-tasks-per-child=10 --loglevel=INFO
+    command: celery -A app.worker.celery_app worker -Q transcribe -c ${WORKER_CONCURRENCY_TRANSCRIBE:-1} -n transcribe@%h --max-tasks-per-child=10 --loglevel=INFO
 
   worker-analyze:
     <<: *worker
-    command: celery -A app.workers.celery_app worker -Q analyze -c ${WORKER_CONCURRENCY_ANALYZE:-4} -n analyze@%h --max-tasks-per-child=100 --loglevel=INFO
+    command: celery -A app.worker.celery_app worker -Q analyze -c ${WORKER_CONCURRENCY_ANALYZE:-4} -n analyze@%h --max-tasks-per-child=100 --loglevel=INFO
 
-  worker-render:
-    <<: *worker
-    command: celery -A app.workers.celery_app worker -Q render -c ${WORKER_CONCURRENCY_RENDER:-1} -n render@%h --max-tasks-per-child=20 --loglevel=INFO
-
-  worker-qa:
-    <<: *worker
-    command: celery -A app.workers.celery_app worker -Q qa -c ${WORKER_CONCURRENCY_QA:-2} -n qa@%h --max-tasks-per-child=100 --loglevel=INFO
-
-  worker-publish:
-    <<: *worker
-    command: celery -A app.workers.celery_app worker -Q publish -c ${WORKER_CONCURRENCY_PUBLISH:-1} -n publish@%h --max-tasks-per-child=20 --loglevel=INFO
-
-  worker-analytics:
-    <<: *worker
-    command: celery -A app.workers.celery_app worker -Q analytics -c ${WORKER_CONCURRENCY_ANALYTICS:-2} -n analytics@%h --max-tasks-per-child=100 --loglevel=INFO
-
-  # Exactly one beat instance. `--lock` prevents accidental duplicates.
+  # Exactly one beat instance, running the stuck-job sweeper. The schedule file lives on the
+  # shared volume: on ephemeral /tmp a restart would forget its schedule and re-fire immediately.
   beat:
     <<: *worker
-    command: celery -A app.workers.celery_app beat --loglevel=INFO --schedule /tmp/celerybeat-schedule
+    command: >
+      sh -c "mkdir -p /tmp/autoclip &&
+             celery -A app.worker.celery_app beat --loglevel=INFO
+                    --schedule /tmp/autoclip/celerybeat-schedule"
 
   # --- frontend ---
   web:
@@ -173,8 +172,9 @@ services:
       target: runner
     environment:
       NODE_ENV: production
+      # The rewrite in frontend/next.config.mjs proxies /api/v1/* here, which is what keeps the
+      # session cookie first-party.
       API_INTERNAL_URL: http://api:8000
-      NEXT_PUBLIC_API_BASE: /api/proxy
       HOSTNAME: 0.0.0.0
     ports: ["3000:3000"]
     depends_on:

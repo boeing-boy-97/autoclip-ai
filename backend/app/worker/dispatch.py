@@ -10,6 +10,7 @@ responses to that, and which one applies depends on configuration:
     production deploy look healthy while blocking a request thread for minutes, which is exactly
     the failure mode this whole change exists to remove.
 """
+
 from __future__ import annotations
 
 import logging

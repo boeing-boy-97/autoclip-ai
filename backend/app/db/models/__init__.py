@@ -68,9 +68,7 @@ user_status_enum = Enum("active", "suspended", "deleted", name="user_status", cr
 workspace_role_enum = Enum(
     "owner", "admin", "editor", "viewer", name="workspace_role", create_type=False
 )
-source_kind_enum = Enum(
-    "upload", "youtube", "cloud_storage", name="source_kind", create_type=False
-)
+source_kind_enum = Enum("upload", "youtube", "cloud_storage", name="source_kind", create_type=False)
 source_state_enum = Enum(
     "pending", "validating", "ready", "rejected", "deleted", name="source_state", create_type=False
 )
@@ -106,21 +104,50 @@ publish_mode_enum = Enum(
     "auto", "manual_approval", "private_review", name="publish_mode", create_type=False
 )
 moment_category_enum = Enum(
-    "hook", "surprising_fact", "educational", "business_insight", "motivational", "funny",
-    "emotional_story", "debate", "opinion", "important_question", "unexpected_answer",
-    "tutorial", "memorable_conclusion", "reaction", "other",
-    name="moment_category", create_type=False,
+    "hook",
+    "surprising_fact",
+    "educational",
+    "business_insight",
+    "motivational",
+    "funny",
+    "emotional_story",
+    "debate",
+    "opinion",
+    "important_question",
+    "unexpected_answer",
+    "tutorial",
+    "memorable_conclusion",
+    "reaction",
+    "other",
+    name="moment_category",
+    create_type=False,
 )
 clip_state_enum = Enum(
-    "DRAFT", "RENDERING", "QA_FAILED", "QA_PASSED", "AWAITING_REVIEW",
-    "APPROVED", "REJECTED", "PUBLISHED", "ARCHIVED",
+    "DRAFT",
+    "RENDERING",
+    "QA_FAILED",
+    "QA_PASSED",
+    "AWAITING_REVIEW",
+    "APPROVED",
+    "REJECTED",
+    "PUBLISHED",
+    "ARCHIVED",
     name="clip_state",
     create_type=False,
 )
 notification_kind_enum = Enum(
-    "analysis_complete", "clips_ready", "qa_failed", "approval_needed", "publish_success",
-    "publish_failed", "auth_expired", "budget_warning", "storage_warning", "system",
-    name="notification_kind", create_type=False,
+    "analysis_complete",
+    "clips_ready",
+    "qa_failed",
+    "approval_needed",
+    "publish_success",
+    "publish_failed",
+    "auth_expired",
+    "budget_warning",
+    "storage_warning",
+    "system",
+    name="notification_kind",
+    create_type=False,
 )
 
 project_status_enum = Enum(
@@ -196,9 +223,7 @@ class WorkspaceMember(Base):
     )
 
     workspace: Mapped[Workspace] = relationship(back_populates="members")
-    user: Mapped[User] = relationship(
-        back_populates="memberships", foreign_keys=[user_id]
-    )
+    user: Mapped[User] = relationship(back_populates="memberships", foreign_keys=[user_id])
 
 
 class Session(Base):
@@ -391,7 +416,6 @@ class MediaAsset(Base):
     project_id: Mapped[uuid.UUID | None] = mapped_column(
         ForeignKey("projects.id", ondelete="CASCADE")
     )
-    clip_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True))
     clip_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True))
     kind: Mapped[str] = mapped_column(media_asset_kind_enum, nullable=False)
     storage_key: Mapped[str] = mapped_column(Text, unique=True, nullable=False)
@@ -589,13 +613,9 @@ class Transcript(Base):
     language: Mapped[str | None] = mapped_column(Text)
     is_corrected: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default="false")
     corrected_from: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("transcripts.id"))
-    word_timestamps: Mapped[bool] = mapped_column(
-        Boolean, nullable=False, server_default="true"
-    )
+    word_timestamps: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default="true")
     confidence: Mapped[float | None] = mapped_column(Numeric(4, 3))
-    cost_usd: Mapped[float] = mapped_column(
-        Numeric(12, 6), nullable=False, server_default="0"
-    )
+    cost_usd: Mapped[float] = mapped_column(Numeric(12, 6), nullable=False, server_default="0")
     raw_json: Mapped[dict | None] = mapped_column(JSONB)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), nullable=False
@@ -670,9 +690,7 @@ class CandidateMoment(Base):
     payoff_text: Mapped[str | None] = mapped_column(Text)
     ending_text: Mapped[str | None] = mapped_column(Text)
     rationale: Mapped[str | None] = mapped_column(Text)
-    standalone_ok: Mapped[bool] = mapped_column(
-        Boolean, nullable=False, server_default="false"
-    )
+    standalone_ok: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default="false")
     selected: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default="false")
     suppressed_reason: Mapped[str | None] = mapped_column(Text)
     created_at: Mapped[datetime] = mapped_column(
@@ -756,9 +774,7 @@ class VideoAnalysis(Base):
     payload: Mapped[dict] = mapped_column(JSONB, nullable=False)
     provider: Mapped[str | None] = mapped_column(Text)
     model: Mapped[str | None] = mapped_column(Text)
-    cost_usd: Mapped[float] = mapped_column(
-        Numeric(12, 6), nullable=False, server_default="0"
-    )
+    cost_usd: Mapped[float] = mapped_column(Numeric(12, 6), nullable=False, server_default="0")
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), nullable=False
     )
@@ -790,18 +806,14 @@ class Clip(Base):
     end_ms: Mapped[int] = mapped_column(Integer, nullable=False)
     duration_ms: Mapped[int] = mapped_column(Integer, nullable=False)
     state: Mapped[str] = mapped_column(clip_state_enum, nullable=False, server_default="DRAFT")
-    layout: Mapped[str] = mapped_column(
-        Text, nullable=False, server_default="single_subject"
-    )
+    layout: Mapped[str] = mapped_column(Text, nullable=False, server_default="single_subject")
     template_key: Mapped[str] = mapped_column(Text, nullable=False, server_default="podcast")
     current_version_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True))
     # The column is `metadata` in the reviewed DDL. `metadata` is taken by SQLAlchemy's schema
     # registry on a declarative class (and assigning it is an error), so the attribute is `meta`
     # and the column name is given explicitly.
     meta: Mapped[dict] = mapped_column("metadata", JSONB, nullable=False, server_default="{}")
-    thumbnail_asset_id: Mapped[uuid.UUID | None] = mapped_column(
-        ForeignKey("media_assets.id")
-    )
+    thumbnail_asset_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("media_assets.id"))
     publishable: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default="false")
     rejection_reason: Mapped[str | None] = mapped_column(Text)
     approved_by: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("users.id"))
@@ -850,9 +862,7 @@ class ClipVersion(Base):
     render_seconds: Mapped[float | None] = mapped_column(Numeric(10, 3))
     encoder_log_ref: Mapped[str | None] = mapped_column(Text)
     source: Mapped[str] = mapped_column(Text, nullable=False, server_default="initial")
-    parent_version_id: Mapped[uuid.UUID | None] = mapped_column(
-        ForeignKey("clip_versions.id")
-    )
+    parent_version_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("clip_versions.id"))
     created_by: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("users.id"))
     rendered_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     created_at: Mapped[datetime] = mapped_column(

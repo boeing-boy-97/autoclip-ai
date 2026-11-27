@@ -9,6 +9,7 @@ Cancellation and retry are deliberately narrow:
   - retry refuses SUCCEEDED jobs, because re-running good work is `/analyze?force=true`, which
     has different semantics and is audited differently
 """
+
 from __future__ import annotations
 
 import uuid
@@ -20,6 +21,7 @@ from app.api.deps import (
     ApiError,
     AuthDep,
     DbDep,
+    Role,
     WorkspaceContext,
     require_csrf,
     workspace_access,
@@ -34,7 +36,8 @@ router = APIRouter(prefix="/workspaces/{workspace_id}/jobs", tags=["Jobs"])
 # Only the pipeline task exists so far; anything else in `processing_jobs` cannot be restarted.
 _RETRYABLE_TASKS = frozenset({"analysis.run"})
 
-def _ws_dep(min_role: str):  # noqa: ANN202 - returns a FastAPI dependency callable
+
+def _ws_dep(min_role: Role):  # noqa: ANN202 - returns a FastAPI dependency callable
     def dependency(
         workspace_id: uuid.UUID,
         auth_ctx: AuthDep,
@@ -160,6 +163,8 @@ def retry_job(
     # `force=True` is the point of a retry: redo the work rather than reusing a prior result.
     # Without it the task reuses the existing transcript, returns immediately, and the retry
     # looks like it did nothing.
+    project_id = job.project_id
+    assert project_id is not None  # a retryable analysis job always belongs to a project
     task_id = dispatch_analysis(
         get_settings(),
         workspace_id=workspace_id,

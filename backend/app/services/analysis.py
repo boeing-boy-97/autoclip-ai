@@ -50,6 +50,7 @@ from app.db.repositories import (
 from app.services.scoring import (
     CandidateWindow,
     ScoreResult,
+    ScoringConfig,
     SegmentView,
     build_windows,
     categorise,
@@ -152,6 +153,30 @@ def _rebuild_analysis_error(data: dict) -> AnalysisError:
     return AnalysisError.from_dict(data)
 
 
+def _digest(value: object) -> bytes | None:
+    """Normalise a stored SHA-256 digest (SQLAlchemy `LargeBinary`) to `bytes | None`."""
+    if value is None:
+        return None
+    return value if isinstance(value, bytes) else bytes(value)  # type: ignore[call-overload]
+
+
+def _load_scoring_config(settings: Settings) -> ScoringConfig:
+    """Load the scoring weights, turning a missing/corrupt file into an explainable error.
+
+    The path is resolved against the repository root (see `Settings.scoring_config_file`), so a
+    container that mounts `config/` reads the same file the tests do. A missing file is a server
+    misconfiguration — but it must say so, not surface as a bare `FileNotFoundError` 500.
+    """
+    try:
+        return load_scoring_config(settings.scoring_config_file)
+    except (OSError, ValueError, KeyError, TypeError) as exc:
+        raise AnalysisError(
+            "scoring_config_invalid",
+            f"scoring configuration at '{settings.scoring_config_file}' could not be loaded: {exc}",
+            status_code=500,
+        ) from exc
+
+
 class AnalysisService:
     def __init__(self, db: Session, settings: Settings, storage: Storage) -> None:
         self.db = db
@@ -185,11 +210,11 @@ class AnalysisService:
                 status_code=409,
             )
 
-        config = load_scoring_config(self.settings.scoring_config_path)
+        config = _load_scoring_config(self.settings)
         # A forced re-run must bypass the idempotency key, so the fingerprint is salted. Without
         # this, `force=true` was accepted by the API and then silently ignored.
         fingerprint = self._fingerprint(
-            source.sha256, config.version, salt=uuid.uuid4().hex if force else None
+            _digest(source.sha256), config.version, salt=uuid.uuid4().hex if force else None
         )
 
         # MOMENT_DETECTION is the end of the analysis band, so an earlier completed run may be
@@ -203,7 +228,9 @@ class AnalysisService:
                 status_code=409,
             )
 
-        existing = self._existing_transcript(source.id, fingerprint, force=force)
+        existing = self._existing_transcript(
+            workspace_id=workspace_id, source_id=source.id, fingerprint=fingerprint, force=force
+        )
         if existing is None and not force and project.status in _ANALYSIS_DONE_STATUSES:
             existing = self._latest_transcript(source.id)
         if existing is not None:
@@ -251,12 +278,12 @@ class AnalysisService:
                 status_code=409,
             )
 
-        config = load_scoring_config(self.settings.scoring_config_path)
+        config = _load_scoring_config(self.settings)
         # A forced re-run must bypass the idempotency key, so the fingerprint is salted. Without
         # this, `force=true` was accepted by the API and then silently ignored — the worst kind of
         # bug, because the caller believes they re-ran the work.
         fingerprint = self._fingerprint(
-            source.sha256, config.version, salt=uuid.uuid4().hex if force else None
+            _digest(source.sha256), config.version, salt=uuid.uuid4().hex if force else None
         )
 
         # A retry carries an explicit job the user asked to re-run, so it may resume a project
@@ -278,7 +305,9 @@ class AnalysisService:
             )
 
         # Idempotency: an identical successful run already exists.
-        existing = self._existing_transcript(source.id, fingerprint, force=force)
+        existing = self._existing_transcript(
+            workspace_id=workspace_id, source_id=source.id, fingerprint=fingerprint, force=force
+        )
         if existing is None and not force and project.status in _ANALYSIS_DONE_STATUSES:
             # Nothing to redo and no legal forward transition: report the existing work rather
             # than failing a project that is already in a valid terminal-for-analysis state.
@@ -643,8 +672,7 @@ class AnalysisService:
                 ending_text=last[:500],
                 rationale=(
                     f"Score {score.overall:.1f}/100 using weights {score.weights_version} "
-                    f"({score.method}). "
-                    + " ".join(f"{k}: {v}" for k, v in score.evidence.items())
+                    f"({score.method}). " + " ".join(f"{k}: {v}" for k, v in score.evidence.items())
                 )[:4000],
                 standalone_ok=score.criteria["standalone"] >= 60,
                 selected=suppressed is None and kept < wanted,
@@ -824,12 +852,15 @@ class AnalysisService:
         return hashlib.sha256(payload.encode()).hexdigest()[:32]
 
     def _existing_transcript(  # noqa: ANN202 - returns an ORM row or None
-        self, source_id: uuid.UUID, fingerprint: str, *, force: bool
+        self, *, workspace_id: uuid.UUID, source_id: uuid.UUID, fingerprint: str, force: bool
     ):
         """Return the transcript produced by an identical completed run, if one exists."""
         if force:
             return None
-        if self.jobs.find_succeeded(input_fingerprint=fingerprint) is None:
+        if (
+            self.jobs.find_succeeded(workspace_id=workspace_id, input_fingerprint=fingerprint)
+            is None
+        ):
             return None
         return self.db.scalar(
             select(Transcript)

@@ -14,6 +14,135 @@ Phase 0 — Architecture and project foundation — **COMPLETE**
 
 ---
 
+## 0. Backend hardening pass (2026-11-27)
+
+A review pass found the stack as committed could not run in containers and had three security
+defects. All of the following are fixed on this branch, each with a regression test in
+`backend/tests/unit/test_hardening.py`:
+
+**Blocking**
+1. `docker-compose.yml` started Celery with `-A app.workers.celery_app`; the package is `app.worker`.
+   Every worker and beat crashed on start. Fixed, plus a CI step and a test that compare the compose
+   file against the Celery app.
+2. `frontend/Dockerfile` could not build: `output: "standalone"` was missing, `public/` did not exist,
+   and the builder reused a `--omit=dev` install that lacks TypeScript. All three fixed.
+3. `SCORING_CONFIG_PATH` was `../config/scoring.yaml` (cwd-relative) and resolved to `/config/...`
+   inside the image, so `/analysis/plan` and every `analysis.run` returned 500. Now resolved against
+   the repository root first (`Settings.scoring_config_file`).
+4. `beat` ran with no schedule, so `analysis.sweep_stuck` never executed. `beat_schedule` added.
+5. Seven queues were declared and only two routed; five workers could never receive work. Compose now
+   runs exactly the queues that have tasks (`media`, `transcribe`, `analyze`) and
+   `JobRepository.queue_for()` clamps anything else.
+
+**Security**
+6. Upload was gated on `_ws_dep("member")` — not a role, ranking 0 — so a **viewer** could upload.
+   Now `editor`, and `min_role` is a `Literal`, so the mistake cannot recur.
+7. CSRF could be skipped by adding any `Authorization: Bearer …` header to a cookie-authenticated
+   request. The check now follows the credential that actually authenticated the request.
+8. Rate limits were configured but never enforced. `app/core/ratelimit.py` (Redis fixed window,
+   fail-open) now backs per-user limits on upload/analysis/render and per-IP limits on login/register;
+   `LoginThrottle` no longer turns a Redis outage into a 500.
+9. `SecretBox` could not rotate its key (it rejected any other `key_version`). It now holds a
+   keyring: `SECRET_ENCRYPTION_KEY_VERSION` + `SECRET_ENCRYPTION_PREVIOUS_KEYS`.
+10. `JobRepository.find_succeeded` was the only query without a `workspace_id` filter; the
+    idempotency probe now requires it.
+
+**Reliability**
+11. `/health/livez` was used as the container healthcheck — always 200. Docker/compose now probe
+    `/health/readyz`, which requires the database, Redis, storage **and FFmpeg**.
+12. The readiness probe called blocking drivers from `async def` (event loop stall), `mkdir`-ed the
+    storage root on every call, and leaked a Redis client. It is now sync (threadpool), side-effect
+    free and closes what it opens.
+13. Upload was `async def` around blocking spooling/FFprobe/S3 code; it is now a sync handler, and it
+    spools to `TMP_ROOT` instead of the container's ephemeral `/tmp`.
+14. `/health` no longer publishes `environment` + the integration inventory in production.
+15. Real slow-query logging (`DB_SLOW_QUERY_MS`) replaces a listener that only ran under DEBUG.
+
+**Developer experience**
+16. `./ops/scripts/dev_env.sh` generates a working `.env` — `cp .env.example .env` always failed,
+    because placeholder secrets are rejected at boot in every environment.
+17. CI: coverage now measured over unit **and** integration suites (it was measured on unit tests
+    only, where the routes and repositories have no coverage); `make_fixtures.sh || echo` and
+    `pip-audit || true` no longer mask failures; `verify_migrations.sh` runs; ruff is pinned.
+
+Verification in this environment: `ruff check` clean, `ruff format --check` clean over
+`backend/app` + `backend/tests`, `pytest tests/unit` green (193 passed, 10 skipped). The integration
+suite needs PostgreSQL + Redis and was not run here — it is exercised by CI's `test-integration` job.
+
+### 0A. Deploying without Docker — PaaS, API + workers (2026-11-27)
+
+The deployment target is a platform (Render / Railway / Fly / Heroku), not a compose stack, and it
+must run the API **and** the background workers. Docker remains only the build recipe the platform
+executes. New in this pass:
+
+1. `backend/scripts/start_api.sh` — honours `$PORT`, `WEB_CONCURRENCY` (default 1), `UVICORN_KEEP_ALIVE`
+   (default 75 s, longer than a proxy's ~60 s idle timeout), `FORWARDED_ALLOW_IPS` and
+   `MIGRATE_ON_START`; runs `python -m uvicorn` so it works without console scripts on `PATH`.
+2. `start_worker.sh` / `start_beat.sh` — same interpreter handling, queues `media,transcribe,analyze`,
+   `--max-tasks-per-child`, a configurable beat schedule file, and a warning that beat is
+   single-instance by definition.
+3. `release.sh` + `app/scripts/migrate.py` — release-phase migrations under a PostgreSQL advisory
+   lock, non-zero exit on failure, `--check` mode, and a URL resolved from the environment so the hook
+   needs **only** `DATABASE_URL` (a missing Redis or S3 setting fails the web deploy instead, with a
+   message naming it).
+4. `app/core/preflight.py` — startup self-check. Fatal: unusable `TMP_ROOT`/storage root, local
+   storage in production, S3 not configured. Warnings (startup continues): missing FFmpeg, empty ASR
+   weight cache, public docs in production, wildcard `TRUSTED_HOSTS`, insecure session cookie, rate
+   limiting disabled, `TMP_ROOT` smaller than `MAX_UPLOAD_MB`. Each is logged as `app.preflight`.
+   The checks are role-aware: each script exports `AUTOCLIP_PROCESS`, so the API is not warned about
+   Whisper weights it never loads and the worker is not warned about `/docs` it does not serve.
+5. `backend/Dockerfile` — `production` is now the **last** stage; with `dev` last, a plain cloud build
+   silently deployed a `--reload` server. Non-root uid 10001, `tini`, HEALTHCHECK on
+   `/api/v1/health/readyz`.
+6. `docs/DEPLOY.md`, `deploy/render.yaml` and `deploy/fly.toml.example` — component table, full env
+   list, per-platform release hook and start commands, and a troubleshooting table keyed on the exact
+   log lines above. Both blueprints mount the volume on the **worker only**, because a Render disk
+   attaches to a single service and a Fly volume to a single machine; mounting one shared `/data` in
+   every process either fails the deploy or silently splits the state.
+
+Verified here with real processes (no Docker, no database): the API started through
+`./scripts/start_api.sh` and answered `livez` 200 with `/docs` 200 in development; the same binary
+under `ENVIRONMENT=production` refused to start with
+`storage_backend=local is not permitted in production` and, with S3 configured instead, started
+while logging `media_tooling_missing`, `asr_model_cache_missing`, `docs_enabled_in_production` and
+`trusted_hosts_wildcard`; `release.sh --check` exited 1 with the connection error and
+`MIGRATE_ON_START=true` aborted before serving. `backend/tests/unit/test_deploy.py` (36 tests) locks
+all of that in.
+
+### 0B. The CI pipeline is green (2026-11-27)
+
+Every job on this branch passes: unit, integration (real PostgreSQL 17 + Redis + FFmpeg),
+frontend, security scan, no-fakes, and the contract job. The contract job had never passed — it was
+red on the branch's base commit too — and the reasons were all defects in the checks, not in the
+code:
+
+* `verify_invariants.sql` reports with `RAISE NOTICE`, which psql writes to **stderr**; the step
+  greped stdout, so it could never see a `PASS:`.
+* The step ran a bash script (`ops/scripts/phase0_verify.sh`) through `python3`.
+* `verify_schema.sh` and `verify_migrations.sh` reached PostgreSQL with `sudo -u postgres`, which is
+  how a developer's machine works and never how CI's service container is reached. Both prefer
+  `PGHOST`/`PGUSER` now and fall back to the sudo path.
+* The drift check's scratch role could not install the extensions the baseline migration creates.
+* A stale assertion still required four worker services that were deleted with the queues that had
+  no tasks, and the "no fake behaviour" grep pointed at `app/` instead of `backend/app/` — it passed
+  vacuously.
+* `bandit` flagged the deliberate `/tmp/autoclip` scratch default; it reads `# nosec`, not ruff's
+  `# noqa`.
+* `docker compose config` cannot run without `.env`, which is gitignored; the job now generates one
+  with the same script developers use.
+
+The drift check is now real: it builds one database from `alembic upgrade head` and one from
+`schema.sql`, dumps both, and diffs them — 1037 identical lines, no drift. Its failures also emit
+GitHub annotations, so a future red check is readable from the PR instead of from a log nobody can
+open.
+
+Not verified, stated plainly: no real platform build (no Docker here). Migrations *were* now
+verified against a real PostgreSQL 16 server in this sandbox — the baseline applies, downgrades and
+re-applies cleanly, and matches `schema.sql` — and CI runs the same check against PostgreSQL 17.
+FFmpeg was still absent locally, so media paths were only exercised by CI.
+
+---
+
 ## 1. Phase 0 deliverables — status
 
 | Deliverable | Status | Artifact |

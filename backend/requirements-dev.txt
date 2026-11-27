@@ -14,7 +14,9 @@ testcontainers[postgres,redis]>=4.8
 fakeredis>=2.26
 
 # --- quality ---
-ruff>=0.8
+# Pinned: the formatter's output changes between minor releases, and CI enforces
+# `ruff format --check`. An unpinned ruff turns a green branch red without a code change.
+ruff==0.17.6
 mypy>=1.13
 types-python-dateutil
 types-requests
@@ -23,3 +25,4 @@ pip-audit>=2.7
 
 # --- docs / tooling ---
 openapi-spec-validator>=0.7
+pyyaml>=6.0              # tests read docker-compose.yml and the YAML config files

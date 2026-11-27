@@ -4,6 +4,7 @@ These are the tests that keep the module's central promise: a caption only appea
 transcription actually recorded. Most of them check that bad input degrades *visibly* rather than
 producing a plausible-looking lie.
 """
+
 from __future__ import annotations
 
 import pytest
@@ -167,8 +168,14 @@ class TestTemplate:
     def test_every_shipped_template_loads(self):
         """A template that fails to parse is a broken product, not a user error."""
         for key in [
-            "podcast", "business", "comedy", "educational",
-            "interview", "motivational", "news", "tutorial",
+            "podcast",
+            "business",
+            "comedy",
+            "educational",
+            "interview",
+            "motivational",
+            "news",
+            "tutorial",
         ]:
             t = Template.load(key)
             assert t.width == 1080, key
@@ -234,16 +241,24 @@ class TestRenderPlan:
 
         with pytest.raises(RenderError, match="end must be after"):
             build_plan(
-                clip_id="abc", template=Template.load("podcast"),
-                start_ms=5000, end_ms=5000, cue_count=0,
-                source_width=None, source_height=None,
+                clip_id="abc",
+                template=Template.load("podcast"),
+                start_ms=5000,
+                end_ms=5000,
+                cue_count=0,
+                source_width=None,
+                source_height=None,
             )
 
     def test_caption_count_of_zero_is_recorded_honestly(self):
         plan = build_plan(
-            clip_id="abc", template=Template.load("podcast"),
-            start_ms=0, end_ms=1000, cue_count=0,
-            source_width=None, source_height=None,
+            clip_id="abc",
+            template=Template.load("podcast"),
+            start_ms=0,
+            end_ms=1000,
+            cue_count=0,
+            source_width=None,
+            source_height=None,
         )
         assert plan.has_captions is False
         assert plan.to_dict()["captions"]["burned"] is False
@@ -257,12 +272,33 @@ class TestStructuredLogging:
     would return 500. `created` was exactly this bug.
     """
 
-    RESERVED = frozenset({
-        "name", "msg", "args", "levelname", "levelno", "pathname", "filename", "module",
-        "exc_info", "exc_text", "stack_info", "lineno", "funcName", "created", "msecs",
-        "relativeCreated", "thread", "threadName", "processName", "process", "message",
-        "asctime", "taskName",
-    })
+    RESERVED = frozenset(
+        {
+            "name",
+            "msg",
+            "args",
+            "levelname",
+            "levelno",
+            "pathname",
+            "filename",
+            "module",
+            "exc_info",
+            "exc_text",
+            "stack_info",
+            "lineno",
+            "funcName",
+            "created",
+            "msecs",
+            "relativeCreated",
+            "thread",
+            "threadName",
+            "processName",
+            "process",
+            "message",
+            "asctime",
+            "taskName",
+        }
+    )
 
     def test_no_log_call_uses_a_reserved_extra_key(self):
         import pathlib
@@ -283,7 +319,14 @@ class TestStructuredLogging:
         import logging
 
         record = logging.getLogger("test").makeRecord(
-            "test", logging.INFO, __file__, 1, "msg", (), None, None,
+            "test",
+            logging.INFO,
+            __file__,
+            1,
+            "msg",
+            (),
+            None,
+            None,
             extra={"project_id": "p", "created_count": 1, "existing_count": 0},
             sinfo=None,
         )

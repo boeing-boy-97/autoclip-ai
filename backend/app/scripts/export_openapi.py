@@ -20,6 +20,7 @@ Run:
     python -m app.scripts.export_openapi
     python -m app.scripts.export_openapi --out /tmp/spec.json --check
 """
+
 from __future__ import annotations
 
 import argparse
@@ -43,9 +44,7 @@ def build_spec() -> dict:
 
 
 def count_operations(spec: dict) -> int:
-    return sum(
-        len([k for k in item if k in METHODS]) for item in spec.get("paths", {}).values()
-    )
+    return sum(len([k for k in item if k in METHODS]) for item in spec.get("paths", {}).values())
 
 
 def summarise(spec: dict) -> str:

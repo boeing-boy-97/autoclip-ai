@@ -14,6 +14,8 @@ from app.api.deps import (
     ApiError,
     AuthDep,
     DbDep,
+    Role,
+    UserRateLimit,
     WorkspaceContext,
     require_csrf,
     workspace_access,
@@ -32,8 +34,14 @@ router = APIRouter(
 
 _CHUNK = 1024 * 1024  # 1 MiB streaming reads — a video is never held in memory
 
+# Uploads are the expensive, abusable operation (CPU for probing, bytes for storage). One limit per
+# user per hour; 0 disables it.
+_UPLOAD_RATE_LIMIT = UserRateLimit(
+    "source_upload", limit_setting="rate_limit_upload_per_hour", window_seconds=3600
+)
 
-def _ws_dep(min_role: str):  # noqa: ANN202 - returns a FastAPI dependency callable
+
+def _ws_dep(min_role: Role):  # noqa: ANN202 - returns a FastAPI dependency callable
     def dependency(
         workspace_id: uuid.UUID,
         auth_ctx: AuthDep,
@@ -45,7 +53,8 @@ def _ws_dep(min_role: str):  # noqa: ANN202 - returns a FastAPI dependency calla
 
 
 WorkspaceViewer = Annotated[WorkspaceContext, Depends(_ws_dep("viewer"))]
-WorkspaceMember = Annotated[WorkspaceContext, Depends(_ws_dep("member"))]
+# Uploading writes data and consumes processing capacity: `editor`, never `viewer`.
+WorkspaceEditor = Annotated[WorkspaceContext, Depends(_ws_dep("editor"))]
 
 
 def _storage():  # noqa: ANN202
@@ -60,9 +69,9 @@ def _storage():  # noqa: ANN202
     "",
     response_model=SourceOut,
     status_code=status.HTTP_201_CREATED,
-    dependencies=[Depends(require_csrf)],
+    dependencies=[Depends(require_csrf), Depends(_UPLOAD_RATE_LIMIT)],
 )
-async def upload_source(
+def upload_source(
     request: Request,
     workspace_id: uuid.UUID,
     project_id: uuid.UUID,
@@ -71,14 +80,19 @@ async def upload_source(
     file: Annotated[UploadFile, File(description="Video file to ingest")],
     rights_basis: Annotated[str, Form()],
     rights_statement: Annotated[str, Form()],
-    ctx: WorkspaceMember,  # noqa: ARG001 - authorization by declaration
+    ctx: WorkspaceEditor,  # noqa: ARG001 - authorization by declaration
 ) -> SourceOut:
     """Upload a source video.
 
-    Order of checks: CSRF → workspace membership → rights declaration → extension/MIME/magic
-    bytes → real `ffprobe` inspection. The file is spooled to a temp file (bounded by
-    `MAX_UPLOAD_MB`), validated, then streamed into storage, so memory use stays constant.
-    On any rejection the stored object is removed — no orphaned bytes, no half-ingested project.
+    Declared `def`, not `async def`, on purpose: spooling, `ffprobe` and the object-store upload are
+    all blocking calls. As a sync handler FastAPI runs it in the threadpool, so one large upload
+    cannot stall every other request on the worker's event loop.
+
+    Order of checks: CSRF → rate limit → workspace membership → rights declaration →
+    extension/MIME/magic bytes → real `ffprobe` inspection. The file is spooled to a temp file on
+    the configured scratch volume (bounded by `MAX_UPLOAD_MB`), validated, then streamed into
+    storage, so memory use stays constant. On any rejection the stored object is removed — no
+    orphaned bytes, no half-ingested project.
     """
     settings = get_settings()
     if not ffmpeg_available(settings.ffprobe_bin):
@@ -99,14 +113,17 @@ async def upload_source(
             status_code=413,
         )
 
+    spool_dir = Path(settings.tmp_root)
+    spool_dir.mkdir(parents=True, exist_ok=True)
+
     tmp_path: str | None = None
     try:
         # Spool to disk while enforcing the cap: the cap is authoritative, not Content-Length.
-        with tempfile.NamedTemporaryFile(delete=False, suffix=".upload") as spool:
+        with tempfile.NamedTemporaryFile(delete=False, suffix=".upload", dir=spool_dir) as spool:
             tmp_path = spool.name
             total = 0
             while True:
-                chunk = await file.read(_CHUNK)
+                chunk = file.file.read(_CHUNK)
                 if not chunk:
                     break
                 total += len(chunk)

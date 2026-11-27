@@ -83,12 +83,33 @@ strings and known key prefixes (`sk-`, `ya29.`, `AIza`) in tracked files.
 
 ## 7. Web hardening
 
-`Content-Security-Policy` (nonce-based scripts, `frame-ancestors 'none'`), `Strict-Transport-Security`,
-`X-Content-Type-Options: nosniff`, `Referrer-Policy: strict-origin-when-cross-origin`,
-`Permissions-Policy` denying camera/mic/geolocation, no `X-Powered-By`.
-CSRF: double-submit token for cookie-authenticated mutating requests, verified server-side;
-`SameSite=Lax` as defence in depth. CORS: exact-origin allowlist, credentials on, no wildcards.
-Rate limits per IP and per workspace (Redis sliding window) on auth, upload, render and publish.
+### 7.1 What the implementation actually enforces (2026-11-27)
+
+| Control | Where | Behaviour |
+|---|---|---|
+| Security headers | `backend/app/main.py` (`security_headers`) | `X-Content-Type-Options: nosniff`, `X-Frame-Options: DENY`, `Referrer-Policy: no-referrer`, `Cross-Origin-Opener-Policy: same-origin`; `Strict-Transport-Security` when `SESSION_COOKIE_SECURE=true` |
+| Host allowlist | `TRUSTED_HOSTS` → `TrustedHostMiddleware` | `*` in development; set the real domain(s) in production |
+| Docs exposure | `DOCS_ENABLED` | `/docs`, `/redoc`, `/openapi.json` are development conveniences and should be off in production |
+| CORS | `CORS_ALLOWED_ORIGINS` | exact origins, credentials on, no wildcard |
+| CSRF | `backend/app/api/deps.py:require_csrf` | decided from the credential that authenticated the request: a bearer-only call (no session cookie) is exempt; **cookie + any `Authorization` header still requires the token** |
+| Cookies | `backend/app/api/v1/auth.py` | `HttpOnly` session, readable CSRF token, `SameSite=Lax`, `Secure` driven by `SESSION_COOKIE_SECURE` (required `true` in production) |
+| Rate limits | `backend/app/core/ratelimit.py` | per-user: uploads/hour, analyses/hour, renders/minute; per-IP: login/register per minute. **Fail-open** on Redis errors, with a warning log |
+| Login throttle | `backend/app/services/auth.py:LoginThrottle` | 5 failures per (email, IP) / 15 min; degrades to unthrottled-with-warning if Redis is down, never to a 500 |
+| Roles | `backend/app/api/deps.py:role_satisfies` | `viewer < editor < admin < owner`; an unknown role name raises instead of ranking 0. Uploading requires `editor` |
+| Secret rotation | `backend/app/core/security.py:SecretBox` | keyring keyed by `key_version`; `SECRET_ENCRYPTION_PREVIOUS_KEYS` keeps old ciphertexts readable during rotation |
+
+`Permissions-Policy` and the nonce-based `Content-Security-Policy` belong to the web tier, which is
+the Next.js app (not this API); they are not set here because they would apply to JSON responses.
+
+### 7.2 Known gaps in this area
+
+1. No per-workspace budget enforcement on provider spend yet (`BUDGET_*` settings are read but the
+   analysis pipeline does not consult them).
+2. Upload throttling is per user only; a per-workspace limit needs the workspace id in the limiter
+   key (the dependency currently keys on the user).
+3. `ProxyHeadersMiddleware`/`forwarded_allow_ips` is not configured; behind a load balancer the
+   client IP used for the auth rate limit and `audit_logs.ip` is the proxy's unless uvicorn is started
+   with `--proxy-headers --forwarded-allow-ips=<proxy>`.
 
 ## 8. Injection and FFmpeg specifics
 

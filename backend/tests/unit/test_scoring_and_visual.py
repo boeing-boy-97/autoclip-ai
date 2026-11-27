@@ -52,9 +52,7 @@ def test_weights_sum_to_one(config):
 
 def test_weights_that_do_not_sum_to_one_are_rejected(tmp_path: Path):
     bad = tmp_path / "bad.yaml"
-    bad.write_text(
-        CONFIG.read_text().replace("weight: 0.15", "weight: 0.50", 1)
-    )
+    bad.write_text(CONFIG.read_text().replace("weight: 0.15", "weight: 0.50", 1))
     with pytest.raises(ValueError, match=r"sum to 1\.0"):
         load_scoring_config(bad)
 
@@ -107,8 +105,12 @@ def test_scores_are_bounded_and_complete(config):
     assert set(result.criteria) == set(CRITERIA)
     assert all(0 <= v <= 100 for v in result.criteria.values())
     assert 0 <= result.overall <= 100
-    assert set(result.rollup) == {"content_potential", "technical_quality",
-                                 "context_completeness", "audience_relevance"}
+    assert set(result.rollup) == {
+        "content_potential",
+        "technical_quality",
+        "context_completeness",
+        "audience_relevance",
+    }
     assert all(0 <= v <= 100 for v in result.rollup.values())
 
 
@@ -166,9 +168,7 @@ def _segments():
 
 
 def test_windows_respect_the_duration_band(config):
-    windows = build_windows(
-        _segments(), target_min_ms=6000, target_max_ms=12000, config=config
-    )
+    windows = build_windows(_segments(), target_min_ms=6000, target_max_ms=12000, config=config)
     assert windows
     for window in windows:
         assert window.duration_ms >= 3000  # configured hard floor
@@ -179,9 +179,7 @@ def test_windows_are_sentence_aligned(config):
     """A window must start and end on segment boundaries — never mid-sentence."""
     segments = _segments()
     boundaries = {s.start_ms for s in segments} | {s.end_ms for s in segments}
-    for window in build_windows(
-        segments, target_min_ms=6000, target_max_ms=12000, config=config
-    ):
+    for window in build_windows(segments, target_min_ms=6000, target_max_ms=12000, config=config):
         assert window.start_ms in boundaries
         assert window.end_ms in boundaries
 

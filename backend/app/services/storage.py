@@ -183,9 +183,7 @@ class S3Storage(Storage):
                     continue
                 total += len(chunk)
                 if total > max_bytes:
-                    raise StorageError(
-                        f"upload exceeds the {max_bytes // (1024 * 1024)} MiB limit"
-                    )
+                    raise StorageError(f"upload exceeds the {max_bytes // (1024 * 1024)} MiB limit")
                 digest.update(chunk)
                 spool.write(chunk)
             spool.seek(0)
@@ -211,12 +209,10 @@ class S3Storage(Storage):
         return int(self.client.head_object(Bucket=self.bucket, Key=key)["ContentLength"])
 
     def signed_url(self, key: str, *, expires_in: int, download_name: str | None = None) -> str:
-        params: dict[str, str] = {"Bucket": self.bucket, "Key": key}
+        params: dict[str, str] = {"Bucket": self.bucket, "Key": key}  # type: ignore[dict-item]
         if download_name:
             params["ResponseContentDisposition"] = f'attachment; filename="{download_name}"'
-        return self.client.generate_presigned_url(
-            "get_object", Params=params, ExpiresIn=expires_in
-        )
+        return self.client.generate_presigned_url("get_object", Params=params, ExpiresIn=expires_in)
 
 
 def get_storage(settings: Settings) -> Storage:

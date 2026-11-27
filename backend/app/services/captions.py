@@ -15,6 +15,7 @@ transcription actually recorded for it.** Four things follow from that, and each
 Output is WebVTT and ASS. Both are generated from the same cue list, so the two files cannot
 disagree about what is on screen when.
 """
+
 from __future__ import annotations
 
 import re
@@ -126,9 +127,7 @@ def build_cues(
     # covered the middle of the frame. max_lines constrains wrapping, not the word budget.
     per_cue = max(1, max_words_per_cue)
 
-    in_range = [
-        w for w in words if w.end_ms > clip_start_ms and w.start_ms < clip_end_ms
-    ]
+    in_range = [w for w in words if w.end_ms > clip_start_ms and w.start_ms < clip_end_ms]
     truncated = sum(1 for w in in_range if w.end_ms > clip_end_ms)
     if not in_range:
         return [], 0, 0
@@ -293,11 +292,15 @@ def to_ass(
         "ScaledBorderAndShadow: yes",
         "",
         "[V4+ Styles]",
-        ("Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, "
-        "BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, "
-        "BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding"),
-        (f"Style: Default,{font_family},{style_size},{ass_colour(text_color)},&H000000FF,"
-        f"&H00000000,&H80000000,-1,0,0,0,100,100,0,0,1,{outline},1,2,40,40,{margin_v},1"),
+        (
+            "Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, "
+            "BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, "
+            "BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding"
+        ),
+        (
+            f"Style: Default,{font_family},{style_size},{ass_colour(text_color)},&H000000FF,"
+            f"&H00000000,&H80000000,-1,0,0,0,100,100,0,0,1,{outline},1,2,40,40,{margin_v},1"
+        ),
         "",
         "[Events]",
         "Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text",
@@ -306,8 +309,7 @@ def to_ass(
     for cue in cues:
         wrapped = _wrap(cue.text, max_lines)
         events.append(
-            f"Dialogue: 0,{_ass_ts(cue.start_ms)},{_ass_ts(cue.end_ms)},"
-            f"Default,,0,0,0,,{wrapped}"
+            f"Dialogue: 0,{_ass_ts(cue.start_ms)},{_ass_ts(cue.end_ms)},Default,,0,0,0,,{wrapped}"
         )
     return "\n".join(header + events) + "\n"
 

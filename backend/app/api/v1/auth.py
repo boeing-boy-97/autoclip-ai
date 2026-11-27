@@ -2,10 +2,17 @@
 
 from __future__ import annotations
 
-from fastapi import APIRouter, Request, Response, status
+from fastapi import APIRouter, Depends, Request, Response, status
 from pydantic import BaseModel, EmailStr, Field
 
-from app.api.deps import ApiError, AuthDep, AuthServiceDep, CSRFDep, SettingsDep
+from app.api.deps import (
+    ApiError,
+    AuthDep,
+    AuthServiceDep,
+    CSRFDep,
+    IpRateLimit,
+    SettingsDep,
+)
 from app.api.schemas import UserOut, workspace_memberships
 from app.db.repositories import WorkspaceRepository
 from app.services.auth import AuthError
@@ -18,6 +25,12 @@ SESSION_COOKIE = "ac_session"
 # double-submit pattern survive a page reload. The cookie is not an authority: it is never trusted
 # on its own, it is only ever compared against the header and against the stored digest.
 CSRF_COOKIE = "ac_csrf"
+
+# Login and registration are unauthenticated, so they are limited per client IP. Without this a
+# single host can spray passwords (one guess per account) at full request rate.
+_AUTH_RATE_LIMIT = IpRateLimit(
+    "auth", limit_setting="rate_limit_auth_per_minute", window_seconds=60
+)
 
 
 class RegisterRequest(BaseModel):
@@ -43,7 +56,7 @@ def _set_session_cookie(response: Response, settings, token: str) -> None:  # no
         key=SESSION_COOKIE,
         value=token,
         httponly=True,
-        secure=settings.environment == "production",
+        secure=settings.session_cookie_secure,
         samesite="lax",
         path="/",
         max_age=settings.session_ttl_hours * 3600,
@@ -61,7 +74,7 @@ def _set_csrf_cookie(response: Response, settings, token: str) -> None:  # noqa:
         key=CSRF_COOKIE,
         value=token,
         httponly=False,
-        secure=settings.environment == "production",
+        secure=settings.session_cookie_secure,
         samesite="lax",
         path="/",
         max_age=settings.session_ttl_hours * 3600,
@@ -84,6 +97,7 @@ def _session_payload(auth: AuthServiceDep, result) -> SessionResponse:  # noqa: 
     status_code=status.HTTP_201_CREATED,
     response_model=SessionResponse,
     summary="Register",
+    dependencies=[Depends(_AUTH_RATE_LIMIT)],
 )
 def register_user(
     payload: RegisterRequest,
@@ -112,7 +126,12 @@ def register_user(
     return _session_payload(auth, result)
 
 
-@router.post("/login", response_model=SessionResponse, summary="Login")
+@router.post(
+    "/login",
+    response_model=SessionResponse,
+    summary="Login",
+    dependencies=[Depends(_AUTH_RATE_LIMIT)],
+)
 def login_user(
     payload: LoginRequest,
     request: Request,

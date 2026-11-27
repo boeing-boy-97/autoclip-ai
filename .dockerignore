@@ -1,0 +1,19 @@
+# Keep the build context small and free of anything that is not source.
+.git
+.github
+.venv
+venv
+__pycache__
+*.pyc
+.pytest_cache
+.ruff_cache
+.mypy_cache
+node_modules
+docs
+storage
+models
+media
+*.log
+.env
+.env.*
+!.env.example

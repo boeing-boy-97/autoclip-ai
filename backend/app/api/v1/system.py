@@ -12,6 +12,7 @@ from app.api.deps import (
     AuthContext,
     AuthDep,
     DbDep,
+    Role,
     WorkspaceContext,
     current_auth,
     workspace_access,
@@ -26,7 +27,7 @@ from app.db.repositories import (
 router = APIRouter(tags=["Dashboard"])
 
 
-def _ws(min_role: str):  # noqa: ANN202
+def _ws(min_role: Role):  # noqa: ANN202
     def _resolver(
         workspace_id: uuid.UUID,
         auth_ctx: Annotated[AuthContext, Depends(current_auth)],
@@ -43,8 +44,9 @@ def _ws(min_role: str):  # noqa: ANN202
 WorkspaceViewer = Annotated[WorkspaceContext, Depends(_ws("viewer"))]
 
 
-@router.get("/workspaces", response_model=list[WorkspaceOut], tags=["Workspaces"],
-            summary="List Workspaces")
+@router.get(
+    "/workspaces", response_model=list[WorkspaceOut], tags=["Workspaces"], summary="List Workspaces"
+)
 def list_workspaces(auth_ctx: AuthDep, db: DbDep) -> list[WorkspaceOut]:
     pairs = WorkspaceRepository(db).list_for_user(user_id=auth_ctx.user.id)
     return [

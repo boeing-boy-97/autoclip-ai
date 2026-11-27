@@ -79,11 +79,15 @@ def detect_scenes(
     cmd = [
         ffmpeg_bin,
         "-nostdin",
-        "-loglevel", "info",
-        "-i", str(path),
-        "-vf", f"select='gt(scene,{threshold})',showinfo",
+        "-loglevel",
+        "info",
+        "-i",
+        str(path),
+        "-vf",
+        f"select='gt(scene,{threshold})',showinfo",
         "-an",
-        "-f", "null",
+        "-f",
+        "null",
         "-",
     ]
     try:
@@ -146,11 +150,16 @@ def sample_frames(
     cmd = [
         ffmpeg_bin,
         "-nostdin",
-        "-v", "error",
-        "-i", str(path),
-        "-vf", f"fps={fps_expr:.6f},scale=320:-2,format=gray",
-        "-frames:v", str(count),
-        "-f", "rawvideo",
+        "-v",
+        "error",
+        "-i",
+        str(path),
+        "-vf",
+        f"fps={fps_expr:.6f},scale=320:-2,format=gray",
+        "-frames:v",
+        str(count),
+        "-f",
+        "rawvideo",
         "-",
     ]
     try:
@@ -237,9 +246,7 @@ def analyse_frames(path: Path, *, duration_ms: int, ffmpeg_bin: str = "ffmpeg") 
 
     metrics: dict[str, float | None] = {
         "scene_count": float(len(scenes)),
-        "mean_scene_ms": float(
-            statistics.mean(s.end_ms - s.start_ms for s in scenes)
-        )
+        "mean_scene_ms": float(statistics.mean(s.end_ms - s.start_ms for s in scenes))
         if scenes
         else None,
     }

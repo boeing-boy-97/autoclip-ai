@@ -21,8 +21,13 @@ from pathlib import Path
 
 ALLOWED_EXTENSIONS = {".mp4", ".mov", ".mkv", ".webm", ".m4v", ".avi"}
 ALLOWED_MIMES = {
-    "video/mp4", "video/quicktime", "video/x-matroska", "video/webm",
-    "video/x-m4v", "video/x-msvideo", "application/octet-stream",
+    "video/mp4",
+    "video/quicktime",
+    "video/x-matroska",
+    "video/webm",
+    "video/x-m4v",
+    "video/x-msvideo",
+    "application/octet-stream",
 }
 # Container signatures (ISO-BMFF brands cover mp4/mov/m4v; Matroska/WebM share an EBML header).
 _ISO_BMFF = (b"ftyp",)
@@ -115,13 +120,16 @@ def validate_magic(head: bytes, ext: str) -> None:
 def _run_ffprobe(path: Path, ffprobe_bin: str) -> dict:
     cmd = [
         ffprobe_bin,
-        "-v", "error",
+        "-v",
+        "error",
         "-hide_banner",
-        "-print_format", "json",
+        "-print_format",
+        "json",
         "-show_format",
         "-show_streams",
         # Restrict protocols so a crafted container cannot make ffprobe fetch remote resources.
-        "-protocol_whitelist", "file",
+        "-protocol_whitelist",
+        "file",
         str(path),
     ]
     try:

@@ -22,10 +22,9 @@ ffmpeg -hide_banner -encoders | grep -E 'libx264|aac'
 
 ```bash
 git clone <repo> && cd autoclip-ai
-cp .env.example .env
-python -c "import os,base64;print(base64.b64encode(os.urandom(32)).decode())"   # run twice → SECRET_KEY, SECRET_ENCRYPTION_KEY
+./ops/scripts/dev_env.sh             # writes .env with real secrets (placeholders are rejected at boot)
 # edit .env: DATABASE_URL, REDIS_URL, storage, budgets
-docker compose up --build            # dev: api, web, 7 workers, beat, postgres, redis, minio
+docker compose up --build            # dev: api, web, 3 workers, beat, postgres, redis, minio
 ```
 
 Manual (no Docker):
@@ -35,8 +34,8 @@ cd backend
 pip install -r requirements-dev.txt
 alembic upgrade head
 uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
-celery -A app.workers.celery_app worker -Q media,analyze -c 2 -n dev@%h --loglevel=INFO
-celery -A app.workers.celery_app beat --loglevel=INFO
+celery -A app.worker.celery_app worker -Q media,transcribe,analyze -c 2 -n dev@%h --loglevel=INFO
+celery -A app.worker.celery_app beat --loglevel=INFO   # runs analysis.sweep_stuck every 60s
 cd ../frontend && npm ci && npm run dev
 ```
 
@@ -51,17 +50,23 @@ api + workers → managed Postgres (PITR) / Redis (AOF) / S3
 beat → exactly ONE replica, `--lock` guarded
 ```
 
-Health: `/api/v1/health/livez` (process up), `/readyz` (dependencies ready), `/health` (full report
-including which integrations are **not configured**). Liveness must not depend on the DB; readiness must.
+Health: `/api/v1/health/livez` (process up), `/api/v1/health/readyz` (dependencies ready — database,
+Redis, storage **and FFmpeg**), `/api/v1/health` (full report including which integrations are **not
+configured**; the integration inventory is omitted when `ENVIRONMENT=production`).
+
+Container health checks and load balancers must poll **readyz**. `livez` answers 200 even when the
+database is down, which is exactly what you do not want a load balancer to trust.
 
 ## 4. Scaling
 
 * API and web are stateless → scale horizontally.
 * `render` and `transcribe` are memory/CPU bound → scale per host, not per replica count. On a 2 vCPU
-  / 2 GB host keep `WORKER_CONCURRENCY_RENDER=1` and `..._TRANSCRIBE=1`.
+  / 2 GB host keep `..._TRANSCRIBE=1`.
+* Only three queues have consumers today (`media`, `transcribe`, `analyze`); `JobRepository.queue_for()`
+  clamps any other stage to `media`, so adding a queue means adding a task *and* a worker.
 * Watch `queue_depth{queue}` and `job_duration_seconds`; add workers for the queue with growing depth
   rather than scaling everything.
-* `publish` stays at 1–2 workers to respect YouTube quota.
+* Publishing workers (when the stage lands) stay at 1–2 to respect YouTube quota.
 * Celery `--max-tasks-per-child` is set per queue to bound FFmpeg/OpenCV memory fragmentation.
 
 ## 5. Backup and restore

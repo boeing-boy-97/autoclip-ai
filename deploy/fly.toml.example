@@ -1,0 +1,76 @@
+# Example Fly.io blueprint — copy to fly.toml and replace the placeholders.
+#
+#   cp deploy/fly.toml.example fly.toml
+#   fly launch --no-deploy
+#   fly volumes create data --size 10 --region bom        # worker only: Whisper weights
+#   fly secrets set SECRET_KEY=... SECRET_ENCRYPTION_KEY=... PASSWORD_PEPPER=... \
+#                   DATABASE_URL=... REDIS_URL=... S3_BUCKET=... S3_ACCESS_KEY_ID=... \
+#                   S3_SECRET_ACCESS_KEY=... S3_ENDPOINT_URL=... S3_REGION=auto
+#   fly deploy
+#   fly scale count app=2 worker=1 beat=1
+#
+# Three processes, one image. `beat` must never be scaled above 1.
+#
+# Two facts about Fly that shape this file:
+#   * A volume attaches to ONE machine, and each process group gets its own machines — so a single
+#     `[[mounts]]` block applying to every process would fail to deploy. The volume is scoped to the
+#     worker (the only process that benefits: it caches multi-GB Whisper weights).
+#   * Everything durable lives in S3. `TMP_ROOT` is scratch: uploads spool there and are then
+#     written to the bucket, and renders build their output there before upload, so an ephemeral
+#     disk is correct for the API and beat.
+
+app = "autoclip-api"
+primary_region = "bom"
+
+[build]
+  dockerfile = "backend/Dockerfile"
+
+[deploy]
+  release_command = "/app/scripts/release.sh"    # migrations, advisory-locked, before machines start
+
+[env]
+  ENVIRONMENT = "production"
+  SESSION_COOKIE_SECURE = "true"
+  DOCS_ENABLED = "false"
+  STORAGE_BACKEND = "s3"
+  S3_FORCE_PATH_STYLE = "false"
+  TMP_ROOT = "/tmp/autoclip"           # ephemeral scratch; S3 is the durable store
+  ASR_MODEL_DIR = "/data/asr-models"   # read by the worker, which is the only process with /data
+  MAX_UPLOAD_MB = "512"
+  FORWARDED_ALLOW_IPS = "*"            # otherwise the proxy IP is the client IP (see DEPLOY.md)
+  WEB_CONCURRENCY = "1"                # one per vCPU; each worker holds its own copy of the app
+  WORKER_QUEUES = "media,transcribe,analyze"
+  WORKER_CONCURRENCY = "1"             # transcription is memory-hungry
+  MAX_TASKS_PER_CHILD = "20"           # recycle before FFmpeg/OpenCV fragmentation adds up
+
+[processes]
+  app = "/app/scripts/start_api.sh"
+  worker = "/app/scripts/start_worker.sh"
+  beat = "/app/scripts/start_beat.sh"
+
+[http_service]
+  internal_port = 8000
+  force_https = true
+  auto_stop_machines = "off"      # the API holds sessions; do not cold-start it
+  auto_start_machines = true
+  min_machines_running = 1
+  processes = ["app"]
+
+  [[http_service.checks]]
+    grace_period = "60s"          # torch/opencv/mediapipe imports are slow on first boot
+    interval = "15s"
+    method = "GET"
+    timeout = "5s"
+    path = "/api/v1/health/readyz"
+
+# Worker only: ASR weights survive restarts. Add a second volume + a second [[mounts]] with
+# processes = ["app"] if you also want an API-side cache; it is not required.
+[[mounts]]
+  source = "data"
+  destination = "/data"
+  processes = ["worker"]
+
+# Transcription and rendering are memory-bound: 2 GB is the practical floor for a worker.
+[[vm]]
+  size = "shared-cpu-2x"
+  memory = "2gb"

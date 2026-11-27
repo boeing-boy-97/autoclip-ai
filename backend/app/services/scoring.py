@@ -38,25 +38,82 @@ CRITERIA = (
 
 # Words that tend to open a self-contained, attention-worthy idea. Used as weak evidence only.
 _HOOK_MARKERS = {
-    "most", "why", "how", "never", "stop", "the", "biggest", "mistake", "truth", "nobody",
-    "everyone", "here", "imagine", "what", "if", "when", "i", "we", "you",
+    "most",
+    "why",
+    "how",
+    "never",
+    "stop",
+    "the",
+    "biggest",
+    "mistake",
+    "truth",
+    "nobody",
+    "everyone",
+    "here",
+    "imagine",
+    "what",
+    "if",
+    "when",
+    "i",
+    "we",
+    "you",
 }
 _QUESTION_STARTERS = ("why", "how", "what", "when", "who", "should", "can", "do", "does", "is")
 _CONTRAST = {"but", "however", "actually", "instead", "yet", "although", "though"}
 _INSIGHT = {
-    "because", "means", "therefore", "so", "learned", "realise", "realize", "discovered",
-    "understand", "reason", "problem", "solution", "result", "matters", "important",
+    "because",
+    "means",
+    "therefore",
+    "so",
+    "learned",
+    "realise",
+    "realize",
+    "discovered",
+    "understand",
+    "reason",
+    "problem",
+    "solution",
+    "result",
+    "matters",
+    "important",
 }
 _RESOLUTION = {"finally", "so", "therefore", "in the end", "the point", "conclusion", "that is"}
 _FILLER = {"um", "uh", "erm", "like", "you know", "kind of", "sort of", "I mean"}
 # Pronouns and deictic references that signal a clip depends on unseen context.
 _DEPENDENT_REFS = {
-    "this", "that", "these", "those", "he", "she", "it", "they", "them", "there", "then",
-    "earlier", "previously", "as i said", "like i said", "anyway",
+    "this",
+    "that",
+    "these",
+    "those",
+    "he",
+    "she",
+    "it",
+    "they",
+    "them",
+    "there",
+    "then",
+    "earlier",
+    "previously",
+    "as i said",
+    "like i said",
+    "anyway",
 }
 _EMOTION_WORDS = {
-    "amazing", "shocking", "surprising", "incredible", "terrible", "huge", "love", "hate",
-    "afraid", "excited", "crazy", "unbelievable", "honestly", "actually", "really",
+    "amazing",
+    "shocking",
+    "surprising",
+    "incredible",
+    "terrible",
+    "huge",
+    "love",
+    "hate",
+    "afraid",
+    "excited",
+    "crazy",
+    "unbelievable",
+    "honestly",
+    "actually",
+    "really",
 }
 
 
@@ -71,7 +128,10 @@ class ScoringConfig:
 
     @property
     def enabled_categories(self) -> list[str]:
-        return list(self.categories.get("enabled") or [])
+        raw = self.categories.get("enabled")
+        if not isinstance(raw, list | tuple):
+            return []
+        return [str(item) for item in raw]
 
 
 def load_scoring_config(path: str | Path) -> ScoringConfig:
@@ -244,8 +304,7 @@ def score_moment(
         standalone += 5.0
     values["standalone"] = _clip(standalone)
     evidence["standalone"] = (
-        f"{f.dependent_refs} context-dependent reference(s) "
-        f"({ref_ratio:.1%} of words)"
+        f"{f.dependent_refs} context-dependent reference(s) ({ref_ratio:.1%} of words)"
     )
 
     # --- audience: language and pacing fit. Only measurable if a caller supplies it.
@@ -385,9 +444,9 @@ def build_windows(
         return []
 
     duration_cfg = config.duration
-    hard_max = int(duration_cfg.get("hard_max_ms", 180_000))
+    hard_max = _as_int(duration_cfg.get("hard_max_ms"), 180_000)
     ceiling = min(max(target_max_ms, target_min_ms), hard_max)
-    floor_ms = int(duration_cfg.get("hard_min_ms", 3_000))
+    floor_ms = _as_int(duration_cfg.get("hard_min_ms"), 3_000)
     windows: list[CandidateWindow] = []
 
     for i in range(len(segments)):
@@ -492,3 +551,11 @@ def categorise(text: str, enabled: list[str]) -> str:
 
 def _clip(value: float) -> float:
     return max(0.0, min(100.0, value))
+
+
+def _as_int(value: object, default: int) -> int:
+    """Coerce a YAML value to int, falling back to `default` rather than raising at runtime."""
+    try:
+        return int(value)  # type: ignore[call-overload]
+    except (TypeError, ValueError):
+        return default

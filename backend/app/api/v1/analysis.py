@@ -17,6 +17,8 @@ from app.api.deps import (
     ApiError,
     AuthDep,
     DbDep,
+    Role,
+    UserRateLimit,
     WorkspaceContext,
     require_csrf,
     workspace_access,
@@ -50,7 +52,7 @@ DISCLAIMER = (
 )
 
 
-def _ws_dep(min_role: str):  # noqa: ANN202 - returns a FastAPI dependency callable
+def _ws_dep(min_role: Role):  # noqa: ANN202 - returns a FastAPI dependency callable
     def dependency(
         workspace_id: uuid.UUID,
         auth_ctx: AuthDep,
@@ -63,6 +65,11 @@ def _ws_dep(min_role: str):  # noqa: ANN202 - returns a FastAPI dependency calla
 
 WorkspaceViewer = Annotated[WorkspaceContext, Depends(_ws_dep("viewer"))]
 WorkspaceEditor = Annotated[WorkspaceContext, Depends(_ws_dep("editor"))]
+
+# Transcription is the most expensive operation in the product; one user cannot queue it at will.
+_ANALYSIS_RATE_LIMIT = UserRateLimit(
+    "analysis_run", limit_setting="rate_limit_analysis_per_hour", window_seconds=3600
+)
 
 
 def _project(db, workspace_id: uuid.UUID, project_id: uuid.UUID) -> Project:  # noqa: ANN001
@@ -90,7 +97,7 @@ def _latest_transcript(db, project_id: uuid.UUID) -> Transcript | None:  # noqa:
     "/analyze",
     response_model=AnalysisStatusOut,
     status_code=status.HTTP_202_ACCEPTED,
-    dependencies=[Depends(require_csrf)],
+    dependencies=[Depends(require_csrf), Depends(_ANALYSIS_RATE_LIMIT)],
     summary="Analyse Project",
 )
 def analyse_project(
@@ -129,6 +136,8 @@ def analyse_project(
 
     if plan.reused:
         return _status(db, project, transcript_id=plan.transcript_id)
+    job_id = plan.job_id
+    assert job_id is not None  # a non-reused plan always reserved a job
 
     try:
         task_id = dispatch_analysis(
@@ -136,7 +145,7 @@ def analyse_project(
             workspace_id=workspace_id,
             project_id=project_id,
             user_id=auth.user.id,
-            job_id=plan.job_id,
+            job_id=job_id,
             force=force,
         )
     except AnalysisError as exc:
@@ -155,12 +164,12 @@ def analyse_project(
 
     if task_id is not None:
         jobs = JobRepository(db)
-        job = jobs.get(workspace_id=workspace_id, job_id=plan.job_id)
+        job = jobs.get(workspace_id=workspace_id, job_id=job_id)
         job.celery_task_id = task_id
         db.commit()
 
     out = _status(db, project, transcript_id=None)
-    return out.model_copy(update={"job_id": plan.job_id, "queued": True})
+    return out.model_copy(update={"job_id": job_id, "queued": True})
 
 
 @router.get("/analysis", response_model=AnalysisStatusOut, summary="Get Analysis Status")
@@ -197,9 +206,7 @@ def get_transcript(
             .order_by(TranscriptSegment.idx)
         )
     )
-    source = db.scalar(
-        select(SourceVideo.duration_ms).where(SourceVideo.project_id == project.id)
-    )
+    source = db.scalar(select(SourceVideo.duration_ms).where(SourceVideo.project_id == project.id))
     # Never mutate the ORM objects to shape the response: a managed object that is dirtied here
     # would be written back on commit, silently erasing stored word timings.
     return TranscriptOut.build(
@@ -238,22 +245,22 @@ def list_moments(
         or 0
     )
 
-    rows = list(
-        db.scalars(
-            stmt.order_by(CandidateMoment.start_ms).offset(offset).limit(limit)
-        )
+    rows = list(db.scalars(stmt.order_by(CandidateMoment.start_ms).offset(offset).limit(limit)))
+    scores = (
+        {
+            s.candidate_id: s
+            for s in db.scalars(
+                select(CandidateScore).where(CandidateScore.candidate_id.in_([r.id for r in rows]))
+            )
+        }
+        if rows
+        else {}
     )
-    scores = {
-        s.candidate_id: s
-        for s in db.scalars(
-            select(CandidateScore).where(CandidateScore.candidate_id.in_([r.id for r in rows]))
-        )
-    } if rows else {}
 
     # Present strongest first: the ranking is the product, but the suppression reason is kept so
     # a reviewer can see what was considered and rejected.
     items = [MomentOut.build(m, scores.get(m.id)) for m in rows]
-    items.sort(key=lambda m: (m.score.overall if m.score else 0), reverse=True)
+    items.sort(key=lambda m: m.score.overall if m.score else 0, reverse=True)
     return MomentPage(
         items=items,
         next_cursor=None if offset + len(items) >= total else str(offset + len(items)),

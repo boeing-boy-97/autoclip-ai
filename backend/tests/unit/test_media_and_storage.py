@@ -154,8 +154,7 @@ def test_build_key_sanitises_kind_and_extension():
 def test_keys_are_unique_per_call():
     ws, proj = uuid.uuid4(), uuid.uuid4()
     keys = {
-        build_key(workspace_id=ws, project_id=proj, kind="sources", ext="mp4")
-        for _ in range(50)
+        build_key(workspace_id=ws, project_id=proj, kind="sources", ext="mp4") for _ in range(50)
     }
     assert len(keys) == 50
 

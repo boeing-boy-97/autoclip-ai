@@ -136,41 +136,76 @@ class SealedSecret:
 
 
 class SecretBox:
-    """AES-256-GCM encryption for stored credentials (OAuth tokens).
+    """AES-256-GCM encryption for stored credentials (OAuth tokens), with key rotation.
+
+    Every sealed value records the id of the key that produced it, so a new key can be introduced
+    while old ciphertexts remain readable: `seal` always uses the current key, `open` looks the
+    recorded version up in the keyring. Without the keyring a rotation would invalidate every
+    stored credential at once — the failure this class exists to avoid.
 
     AAD binds the ciphertext to a purpose and owner id, preventing a token blob from being
     moved between rows or tables and still decrypting.
     """
 
-    def __init__(self, key_b64: str, key_version: int = 1) -> None:
-        raw = base64.b64decode(key_b64, validate=True)
-        if len(raw) != 32:
-            raise ValueError("encryption key must decode to 32 bytes")
-        self._aes = AESGCM(raw)
-        self.key_version = key_version
+    def __init__(
+        self,
+        keys: dict[int, str],
+        *,
+        current_version: int | None = None,
+    ) -> None:
+        if not keys:
+            raise ValueError("at least one encryption key is required")
+        self._aes: dict[int, AESGCM] = {}
+        for version, key_b64 in keys.items():
+            raw = base64.b64decode(key_b64, validate=True)
+            if len(raw) != 32:
+                raise ValueError(f"encryption key for version {version} must decode to 32 bytes")
+            self._aes[int(version)] = AESGCM(raw)
+        self.key_version = current_version or max(self._aes)
+        if self.key_version not in self._aes:
+            raise ValueError(
+                f"current key version {self.key_version} is not present in the keyring "
+                f"(have {sorted(self._aes)})"
+            )
+
+    @classmethod
+    def single(cls, key_b64: str, key_version: int = 1) -> SecretBox:
+        """Convenience constructor for one key — used by tests and single-key deployments."""
+        return cls({key_version: key_b64}, current_version=key_version)
 
     @staticmethod
     def _aad(purpose: str, owner_id: str) -> bytes:
         return f"autoclip:v1:{purpose}:{owner_id}".encode()
 
+    @property
+    def key_versions(self) -> list[int]:
+        return sorted(self._aes)
+
     def seal(self, plaintext: str, *, purpose: str, owner_id: str) -> SealedSecret:
         nonce = os.urandom(12)
-        ct = self._aes.encrypt(nonce, plaintext.encode("utf-8"), self._aad(purpose, owner_id))
+        aes = self._aes[self.key_version]
+        ct = aes.encrypt(nonce, plaintext.encode("utf-8"), self._aad(purpose, owner_id))
         return SealedSecret(payload=nonce + ct, key_version=self.key_version)
 
     def open(self, sealed: SealedSecret, *, purpose: str, owner_id: str) -> str:
-        if sealed.key_version != self.key_version:
+        aes = self._aes.get(sealed.key_version)
+        if aes is None:
             raise ValueError(
-                f"sealed secret uses key_version {sealed.key_version}, "
-                f"box holds {self.key_version}; rotate keys instead of guessing"
+                f"sealed secret uses key_version {sealed.key_version}, which is not in the "
+                f"keyring (known versions: {self.key_versions}); add the old key to "
+                "SECRET_ENCRYPTION_PREVIOUS_KEYS rather than dropping it"
             )
         nonce, ct = sealed.payload[:12], sealed.payload[12:]
         try:
-            return self._aes.decrypt(nonce, ct, self._aad(purpose, owner_id)).decode("utf-8")
+            return aes.decrypt(nonce, ct, self._aad(purpose, owner_id)).decode("utf-8")
         except InvalidTag as exc:
             raise ValueError(
                 "secret failed authentication: wrong key, corrupted data, or AAD mismatch"
             ) from exc
+
+    def needs_rotation(self, sealed: SealedSecret) -> bool:
+        """True when a readable value was sealed with an older key and should be re-sealed."""
+        return sealed.key_version != self.key_version and sealed.key_version in self._aes
 
 
 # --- convenience accessors bound to settings ----------------------------------------------
@@ -183,4 +218,4 @@ def password_service(settings: Settings | None = None) -> PasswordService:
 
 def secret_box(settings: Settings | None = None) -> SecretBox:
     s = settings or get_settings()
-    return SecretBox(s.secret_encryption_key)
+    return SecretBox(s.secret_encryption_keyring, current_version=s.secret_encryption_key_version)

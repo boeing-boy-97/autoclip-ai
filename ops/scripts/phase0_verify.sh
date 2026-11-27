@@ -14,7 +14,12 @@ cd "${REPO_ROOT}"
 PASS=0; FAIL=0
 step() { printf '\n\033[1m▶ %s\033[0m\n' "$1"; }
 ok()   { printf '  \033[32m✓ %s\033[0m\n' "$1"; PASS=$((PASS+1)); }
-bad()  { printf '  \033[31m✗ %s\033[0m\n' "$1"; FAIL=$((FAIL+1)); }
+bad()  {
+  printf '  \033[31m✗ %s\033[0m\n' "$1"
+  # Annotate the failure so it is readable from the PR page, not only from the job log.
+  echo "::error title=phase0: $1::${2:-$1}"
+  FAIL=$((FAIL+1))
+}
 
 # ---------------------------------------------------------------- 1. documents
 step "1. Required Phase 0 documents exist and are non-trivial"
@@ -108,15 +113,18 @@ step "5. docker-compose.yml is structurally valid"
 python3 - <<'PY'
 import sys, yaml
 d = yaml.safe_load(open("docker-compose.yml"))
+# Only the queues that actually have tasks. Five empty workers used to sit here waiting for
+# messages no code produced; they were removed rather than wired up.
 required = {"postgres", "redis", "api", "web", "beat",
-            "worker-media", "worker-transcribe", "worker-analyze",
-            "worker-render", "worker-qa", "worker-publish", "worker-analytics"}
+            "worker-media", "worker-transcribe", "worker-analyze"}
 missing = required - set(d["services"])
 if missing:
     print(f"  \033[31m✗ missing services: {missing}\033[0m"); sys.exit(1)
 for name in required:
     assert "image" in d["services"][name] or "build" in d["services"][name], name
-print(f"  \033[32m✓ {len(d['services'])} services, all 7 queues + beat + infra present\033[0m")
+expected = len(required)
+assert len(d["services"]) >= expected, f"{len(d['services'])} services, expected at least {expected}"
+print(f"  \033[32m✓ {len(d['services'])} services: task queues + beat + infra present\033[0m")
 PY
 if [[ $? -eq 0 ]]; then ok "compose valid"; else bad "compose invalid"; fi
 
@@ -160,11 +168,11 @@ fi
 
 # ---------------------------------------------------------------- 9. no fake integrations
 step "9. No mock/fake behaviour in production code paths"
-HITS=$(grep -rn --include=*.py -E '(if +.*environment *=+ *"test"|FAKE_|DUMMY_|MOCK_|mock_response *=|return +\{?["'"'"']success["'"'"'])' app/ 2>/dev/null | grep -v '^app/.*#' || true)
+HITS=$(grep -rn --include=*.py -E '(if +.*environment *=+ *"test"|FAKE_|DUMMY_|MOCK_|mock_response *=|return +\{?["'"'"']success["'"'"'])' backend/app/ 2>/dev/null | grep -v '^backend/app/.*#' || true)
 if [[ -z "${HITS}" ]]; then
-  ok "no test/date branches or fake-success returns in app/"
+  ok "no test-only branches or fake-success returns in backend/app/"
 else
-  bad "suspicious test/fake code in app/:"; echo "${HITS}"
+  bad "suspicious test/fake code in backend/app/:"; echo "${HITS}"
 fi
 
 # ---------------------------------------------------------------- summary

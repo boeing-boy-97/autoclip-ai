@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import base64
 from functools import lru_cache
+from pathlib import Path
 from typing import Literal
 from urllib.parse import urlparse
 
@@ -53,10 +54,30 @@ class Settings(BaseSettings):
     password_pepper: str = Field(..., min_length=16)
     session_cookie_name: str = "ac_session"
     session_ttl_hours: int = 168
+    # Cookies must be `Secure` wherever they travel over TLS. This is an explicit switch rather
+    # than `environment == "production"`, because a staging or preview deployment is served over
+    # HTTPS too and `environment` is not a reliable proxy for the scheme in use.
+    session_cookie_secure: bool = False
     csrf_enabled: bool = True
+    # Rate limits. 0 disables a limit; see app/core/ratelimit.py for the fail-open policy.
     rate_limit_per_minute: int = 120
     rate_limit_upload_per_hour: int = 30
+    rate_limit_auth_per_minute: int = 20
+    rate_limit_analysis_per_hour: int = 60
+    rate_limit_render_per_minute: int = 10
     max_upload_mb: int = 4096
+    # Hosts the API will answer for ("*" = any). Set to your domain(s) in production so a
+    # misdirected Host header cannot be used to poison absolute URLs.
+    trusted_hosts: str = "*"
+    # Interactive docs and the OpenAPI schema are a development convenience; they are also a
+    # complete map of the API. Disable them in production.
+    docs_enabled: bool = True
+    # AES-GCM key id written into every sealed value. Bump it when you introduce a new key and
+    # keep the old one in SECRET_ENCRYPTION_PREVIOUS_KEYS until everything has been re-sealed.
+    secret_encryption_key_version: int = 1
+    # e.g. "1:<base64-32-bytes>,2:<base64-32-bytes>" — versions strictly older than the current
+    # one may appear here. Rotation is therefore possible without a flag day.
+    secret_encryption_previous_keys: str | None = None
 
     # ---------------------------------------------------------------- database (required)
     database_url: str = Field(..., min_length=1)
@@ -68,6 +89,8 @@ class Settings(BaseSettings):
     db_max_overflow: int = 20
     db_pool_timeout: int = 30
     db_echo: bool = False
+    # A statement slower than this is logged (statement text only, never parameters).
+    db_slow_query_ms: int = 500
 
     # ---------------------------------------------------------------- redis (required)
     redis_url: str = Field(..., min_length=1)
@@ -109,10 +132,10 @@ class Settings(BaseSettings):
     template_dir: str = "config/templates"
     audio_target_lufs: float = -14.0
     audio_true_peak_dbtp: float = -1.0
-    # Path to the scoring weights. Relative to the process working directory (the repo root in
-    # Docker, backend/ when running pytest from there).
-    scoring_config_path: str = "../config/scoring.yaml"
-    tmp_root: str = "/tmp/autoclip"  # noqa: S108 - per-job scratch dir, cleaned in finally
+    # Path to the scoring weights. Resolved against the repository root first, then the process
+    # working directory, so the API, a Celery worker and a test run all find the same file.
+    scoring_config_path: str = "config/scoring.yaml"
+    tmp_root: str = "/tmp/autoclip"  # noqa: S108  # nosec B108 - per-job scratch, cleaned up
     render_target_width: int = 1080
     render_target_height: int = 1920
     max_source_duration_minutes: int = 360
@@ -153,6 +176,9 @@ class Settings(BaseSettings):
 
     # ---------------------------------------------------------------- frontend proxy
     api_internal_url: str = "http://localhost:8000"
+
+    # ---------------------------------------------------------------- product defaults
+    workspace_default_language: str = "en"
 
     # ================================================================ validators
     @field_validator("database_url", "database_url_migrations", mode="before")
@@ -210,6 +236,34 @@ class Settings(BaseSettings):
             raise ValueError("youtube_redirect_uri must be an absolute http(s) URL.")
         return v
 
+    @field_validator("secret_encryption_previous_keys")
+    @classmethod
+    def _validate_previous_keys(cls, v: str | None) -> str | None:
+        """Reject a malformed keyring at boot instead of at the first decrypt."""
+        if not v:
+            return None
+        for raw_entry in v.split(","):
+            entry = raw_entry.strip()
+            if not entry:
+                continue
+            version, _, key = entry.partition(":")
+            if not version.strip().isdigit() or not key.strip():
+                raise ValueError(
+                    "secret_encryption_previous_keys must be 'VERSION:base64key' pairs "
+                    "separated by commas (for example '1:abc...==,2:def...==')."
+                )
+            try:
+                raw = base64.b64decode(key.strip(), validate=True)
+            except Exception as exc:
+                raise ValueError(
+                    f"previous key for version {version.strip()} is not valid base64."
+                ) from exc
+            if len(raw) != 32:
+                raise ValueError(
+                    f"previous key for version {version.strip()} must decode to exactly 32 bytes."
+                )
+        return v
+
     @model_validator(mode="after")
     def _validate_environment(self) -> Settings:
         if self.environment == "production":
@@ -225,6 +279,13 @@ class Settings(BaseSettings):
                 )
             if self.celery_task_always_eager:
                 raise ValueError("celery_task_always_eager must be false in production.")
+            if not self.session_cookie_secure:
+                raise ValueError(
+                    "session_cookie_secure must be true in production; the session cookie would "
+                    "otherwise travel over plaintext connections."
+                )
+        if self.secret_encryption_key_version < 1:
+            raise ValueError("secret_encryption_key_version must be >= 1.")
         return self
 
     @model_validator(mode="after")
@@ -239,6 +300,39 @@ class Settings(BaseSettings):
     @property
     def cors_origins(self) -> list[str]:
         return [o.strip() for o in self.cors_allowed_origins.split(",") if o.strip()]
+
+    @property
+    def trusted_host_list(self) -> list[str]:
+        return [h.strip() for h in self.trusted_hosts.split(",") if h.strip()] or ["*"]
+
+    @property
+    def scoring_config_file(self) -> Path:
+        """Absolute path to the scoring weights, whatever the process' working directory is.
+
+        Repository root first (a container mounts `config/` at `/app/config`, a test run starts in
+        `backend/`), then the working directory as a last resort for operators who point the
+        setting at an absolute path or a file next to their shell.
+        """
+        path = Path(self.scoring_config_path)
+        if path.is_absolute():
+            return path
+        repo_root = Path(__file__).resolve().parents[3]
+        candidate = repo_root / path
+        if candidate.exists():
+            return candidate
+        return Path.cwd() / path
+
+    @property
+    def secret_encryption_keyring(self) -> dict[int, str]:
+        """version -> base64 key, including the current key and any previous ones."""
+        keyring: dict[int, str] = {self.secret_encryption_key_version: self.secret_encryption_key}
+        for raw_entry in (self.secret_encryption_previous_keys or "").split(","):
+            entry = raw_entry.strip()
+            if not entry:
+                continue
+            version, _, key = entry.partition(":")
+            keyring.setdefault(int(version.strip()), key.strip())
+        return keyring
 
     @property
     def youtube_configured(self) -> bool:
@@ -298,4 +392,5 @@ def get_settings() -> Settings:
     untestable, hide which component needs which variable, and turn a config error into an
     opaque import failure. Callers obtain settings explicitly (FastAPI dependency or startup).
     """
-    return Settings()
+    # Required fields come from the environment (pydantic-settings), which mypy cannot model.
+    return Settings()  # type: ignore[call-arg]
