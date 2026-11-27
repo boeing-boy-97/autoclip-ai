@@ -106,7 +106,7 @@ def create_project(
     )
     db.commit()
     db.refresh(project)
-    return ProjectOut.model_validate(project)
+    return ProjectOut.from_model(project)
 
 
 @router.get("", response_model=ProjectPage, summary="List Projects")
@@ -126,7 +126,9 @@ def list_projects(
     except ConflictError as exc:
         raise _translate(exc) from exc
     return ProjectPage(
-        items=[ProjectOut.model_validate(p) for p in page.items],
+        # Not `model_validate`: a project that has a source carries bytes for sha256, which the
+        # schema would refuse. This was a live 500 on the project list until it was fixed.
+        items=[ProjectOut.from_model(p) for p in page.items],
         next_cursor=page.next_cursor,
     )
 
@@ -166,7 +168,7 @@ def update_project(
         raise _translate(exc) from exc
     db.commit()
     db.refresh(project)
-    return ProjectOut.model_validate(project)
+    return ProjectOut.from_model(project)
 
 
 @router.delete(

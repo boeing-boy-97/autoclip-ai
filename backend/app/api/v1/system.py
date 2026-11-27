@@ -77,7 +77,7 @@ def dashboard_summary(ctx: WorkspaceViewer, db: DbDep) -> DashboardSummary:
         queue_depth=data["queue_depth"],
         storage_mb=data["storage_mb"],
         unread_notifications=data["unread_notifications"],
-        recent_projects=[ProjectOut.model_validate(p) for p in data["recent_projects"]],
+        recent_projects=[ProjectOut.from_model(p) for p in data["recent_projects"]],
         recent_activity=data["recent_activity"],
         is_empty=data["is_empty"],
     )

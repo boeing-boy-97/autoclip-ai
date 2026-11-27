@@ -656,11 +656,99 @@ through its own clip and workspace, so passing another clip's version id is a 40
   response says so, rather than returning a link that would 404.
 - **Beat is still not deployed**, so `analysis.sweep_stuck` remains unscheduled (§4C).
 
+## 4E. Phase 3 (partial) — The web frontend (first complete slice)
+
+Until this point the frontend was a Dockerfile and nothing else: the API was fully exercisable over
+HTTP and there was no way to use the product. This is the first slice that makes the pipeline a
+thing a person can sit in front of.
+
+### What was built
+
+Next.js 15 App Router, TypeScript strict, no UI framework — a hand-written design system in
+`app/globals.css`, because a handful of screens did not justify the dependency or the bundle.
+
+| Route | What it does |
+| --- | --- |
+| `/login`, `/register` | Session start, with the API's field errors surfaced per input |
+| `/dashboard` | Counts, per-stage breakdown, recent projects |
+| `/projects` | List + inline create |
+| `/projects/[id]` | **The core screen** — upload with progress and rights statement, analyse, candidate moments with expandable component scores, per-clip render/reject/versions/captions, transcript with untimed words marked, stage journal |
+| `/clips/[id]` | A shareable address for one clip |
+| `/jobs` | Every stage run, with cancel/retry, polling only while work is in flight |
+
+`app/error.tsx` is a route-level boundary: one unguarded field on one panel must not blank the app.
+
+### How it talks to the API
+
+The browser only ever talks to its own origin. `next.config.mjs` rewrites `/api/v1/*` to the API,
+so the session cookie is first-party and **CORS stays out of the auth story entirely**. The browser
+never learns the API's internal address.
+
+### Bugs found by building the UI (all fixed)
+
+Building the UI was, as usual, the most effective review the API has had.
+
+1. **`GET /projects` returned 500 for any project that had a source.** The list route validated the
+   ORM straight into `ProjectOut`, and `SourceVideo.sha256` is `bytes`, which the schema refused as
+   a string. Every existing test listed a *source-less* project, so the bug was invisible for three
+   phases. The detail route had already solved this by hand; the fix generalises that solution into
+   `ProjectOut.from_model` and uses it in all three call sites (create, list, patch) and the
+   dashboard's recent-projects list. Regression tests added for both the list and the dashboard.
+2. **`GET /auth/me` could not be used to resume a session.** It returns the user, and the server
+   stores only a *digest* of the CSRF token, so a reloaded page had no way to obtain a token and
+   every subsequent mutation 403'd forever. The app was therefore unusable after any reload.
+   Fixed by publishing the token as a second, readable, non-authoritative cookie (`ac_csrf`) and
+   refreshing it on `/auth/me`. Double-submit still holds: the cookie is never trusted alone, only
+   compared against the header and the stored digest.
+3. **`generate-clips` returned 500 after writing its rows.** The structured log call used
+   `extra={"created": ...}`; `created` is a reserved `LogRecord` attribute, so `makeRecord` raised
+   `KeyError` — a logging mistake turned into a failed request for work that had already succeeded.
+   Renamed, and a test now scans every `extra=` in `app/` against the reserved set.
+4. **The project page crashed the whole app on a guessed response shape.** The UI's `RenderPlan`
+   type had invented a `layout` object and an `audio` block; the real plan has neither. The
+   unguarded read replaced the entire screen with Next's generic error page. Fixed by copying the
+   type from a live response, and by adding the route error boundary so this class of mistake
+   degrades to one panel instead of the whole app.
+
+### Verified in a browser, against the real stack
+
+Driven with Playwright against the running API, not asserted from a mock:
+
+```
+login -> dashboard          real counts (1 project, 1 source, 0 failed jobs, 0.9 MB)
+projects -> project         upload 640x360 19.8 s fixture, analyse, 5 moments, 65 words
+clip card                   "When I started, I spent three weeks copying examples…"
+                            rendered: 1080x1920, 2.5 MB, 10 cues, 100% coverage
+caption panel               10 cues, 4 words each, 00:00.0-00:01.2 first
+reject via the UI           typed reason -> REJECTED, reason shown, render unlocked
+render again via the UI     v2 produced, both versions listed, current = v2
+score disclosure            14 component bars + the stored rationale text
+console                     no page errors (only the expected pre-login 401)
+```
+
+Navigation, session persistence across reloads, and every mutation were exercised by clicking.
+
+### Not done in this slice
+
+- **No video playback.** The local storage backend exposes no signed URL, so a rendered clip is
+  *described* (dimensions, size, version) rather than played. That is honest but it is not a
+  preview; a storage backend with signed URLs, or a streaming proxy route, is the missing piece.
+- **`regenerate`, `approve`, `publish` and `schedule`** have designed routes and no implementation;
+  the UI does not offer them.
+- **No project settings screen.** Template, durations and target platform can only be set at
+  creation.
+- **No upload resume**, and no client-side validation of codec or duration before the bytes go up —
+  a bad file is rejected by the server after the transfer.
+- **The frontend has no automated tests.** It was verified by driving it, which catches far more
+  than nothing but does not stop a regression. Playwright is installed in the sandbox; a smoke test
+  per route is the obvious next step.
+
 ## 5. Outstanding limitations (stated, not hidden)
 
 ### Expected at this phase
-1. **No frontend yet.** The Next.js app is still scaffolding; the backend API is fully exercisable
-   via HTTP (see the live evidence in §4A) but there is no UI. This is the largest remaining gap.
+1. ~~**No frontend yet.**~~ **Done — see §4E.** The dashboard, project workspace, clip review and
+   jobs screens all exist and were verified in a browser against the live API. Remaining frontend
+   gaps (no in-app playback, no automated UI tests) are listed at the end of §4E.
 2. **Publishing is not implemented.** Analysis, clip generation and 9:16 rendering now work (§4C,
    §4D); YouTube upload remains specified-only.
 3. **No frontend yet** — see item 1.
@@ -726,8 +814,8 @@ anywhere in the output.
 4. **Quality check** — reuse the Phase 2 visual metrics as the objective half of the QC report.
 5. **YouTube OAuth and publish** — needs real credentials; until then the honest
    `youtube_not_configured` path stays.
-6. **Frontend** — dashboard, create-project, upload with progress, transcript viewer, moment list
-   with per-component scores visible.
+6. ~~**Frontend** — dashboard, create-project, upload with progress, transcript viewer, moment list
+   with per-component scores visible.~~ **Done — see §4E.**
 7. **A production ASR model and a real accuracy measurement.** `tiny.en` proved the pipeline, not
    the product; word error rate on actual source material is unmeasured.
 

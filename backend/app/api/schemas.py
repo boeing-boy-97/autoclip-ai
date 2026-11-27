@@ -154,7 +154,7 @@ class ProjectCounts(BaseModel):
     jobs_active: int = 0
 
 
-class ProjectOut(ORMModel):
+class _ProjectOutBase(ORMModel):
     id: uuid.UUID
     workspace_id: uuid.UUID
     name: str
@@ -177,6 +177,31 @@ class ProjectOut(ORMModel):
     source: SourceOut | None = None
 
 
+class _ProjectOutWithSource(_ProjectOutBase):
+    """`ProjectOut` with a source-normalising constructor.
+
+    The ORM's `SourceVideo.sha256` is bytes, so validating a `Project` that has a source fails at
+    serialisation time. `from_model` is the only supported way to build this on the wire.
+    """
+
+    @classmethod
+    def from_model(cls, project) -> ProjectOut:  # noqa: ANN001
+        from_orm = super().model_validate
+        payload = {
+            name: getattr(project, name)
+            for name in cls.model_fields
+            if name != "source"
+        }
+        source = getattr(project, "source", None)
+        payload["source"] = SourceOut.from_model(source) if source is not None else None
+        return from_orm(payload)
+
+
+ProjectOut = _ProjectOutWithSource
+ProjectOut.__name__ = "ProjectOut"
+ProjectOut.__qualname__ = "ProjectOut"
+
+
 class ProjectDetail(ProjectOut):
     stage_events: list[StageEventOut] = Field(default_factory=list)
 
@@ -184,19 +209,14 @@ class ProjectDetail(ProjectOut):
     def build(
         cls, project, events, source=None  # noqa: ANN001
     ) -> ProjectDetail:
-        """Assemble from ORM objects, normalising the nested source.
+        """Assemble from ORM objects.
 
-        `ProjectOut.source` is a `SourceOut`, and the ORM's `sha256` is bytes. Validating the
-        ORM object wholesale therefore fails at serialisation time — a bug that stays invisible
-        until a project actually has a source. Construction goes through `SourceOut.from_model`.
+        Normalising the nested source is `ProjectOut.from_model`'s job; doing it again here is
+        how the two paths drifted apart in the first place.
         """
         detail = cls.model_validate(
             {
-                **{
-                    name: getattr(project, name)
-                    for name in ProjectOut.model_fields
-                    if name != "source"
-                },
+                **ProjectOut.from_model(project).model_dump(),
                 "source": SourceOut.from_model(source) if source is not None else None,
             }
         )

@@ -177,8 +177,10 @@ class ClipService:
             "clips generated",
             extra={
                 "project_id": str(project_id),
-                "created": len(created_ids),
-                "existing": existing,
+                # `created` is a reserved LogRecord attribute; logging with it raises KeyError and
+                # would turn a successful generate into a 500 after the rows were already written.
+                "created_count": len(created_ids),
+                "existing_count": existing,
             },
         )
         return GenerateOutcome(

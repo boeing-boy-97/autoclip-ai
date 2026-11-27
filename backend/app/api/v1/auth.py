@@ -13,6 +13,11 @@ from app.services.auth import AuthError
 router = APIRouter(prefix="/auth", tags=["Auth"])
 
 SESSION_COOKIE = "ac_session"
+# The session row stores only a digest of the CSRF token, so the server cannot re-issue a token it
+# has already forgotten. A second, *readable* cookie carries the token itself, which makes the
+# double-submit pattern survive a page reload. The cookie is not an authority: it is never trusted
+# on its own, it is only ever compared against the header and against the stored digest.
+CSRF_COOKIE = "ac_csrf"
 
 
 class RegisterRequest(BaseModel):
@@ -38,6 +43,24 @@ def _set_session_cookie(response: Response, settings, token: str) -> None:  # no
         key=SESSION_COOKIE,
         value=token,
         httponly=True,
+        secure=settings.environment == "production",
+        samesite="lax",
+        path="/",
+        max_age=settings.session_ttl_hours * 3600,
+    )
+
+
+def _set_csrf_cookie(response: Response, settings, token: str) -> None:  # noqa: ANN001
+    """Publish the CSRF token so a reloaded page can keep sending it.
+
+    Deliberately not HttpOnly: the browser must be able to read it. That is safe because the token
+    grants nothing by itself — a request without it fails, and a request with it from another origin
+    cannot read this value under the same-origin policy.
+    """
+    response.set_cookie(
+        key=CSRF_COOKIE,
+        value=token,
+        httponly=False,
         secure=settings.environment == "production",
         samesite="lax",
         path="/",
@@ -85,6 +108,7 @@ def register_user(
 
     auth.db.commit()
     _set_session_cookie(response, settings, result.session_token)
+    _set_csrf_cookie(response, settings, result.csrf_token)
     return _session_payload(auth, result)
 
 
@@ -113,6 +137,7 @@ def login_user(
 
     auth.db.commit()
     _set_session_cookie(response, settings, result.session_token)
+    _set_csrf_cookie(response, settings, result.csrf_token)
     return _session_payload(auth, result)
 
 
@@ -128,13 +153,29 @@ def logout_user(
     auth.logout(token=auth_ctx.session_token, ip=request.client.host if request.client else None)
     auth.db.commit()
     response.delete_cookie(SESSION_COOKIE, path="/")
+    response.delete_cookie(CSRF_COOKIE, path="/")
     response.status_code = status.HTTP_204_NO_CONTENT
     return response
 
 
 @router.get("/me", response_model=UserOut, summary="Get Me")
-def get_me(auth_ctx: AuthDep, auth: AuthServiceDep) -> UserOut:
+def get_me(
+    request: Request,
+    response: Response,
+    auth_ctx: AuthDep,
+    auth: AuthServiceDep,
+    settings: SettingsDep,
+) -> UserOut:
+    """The signed-in user, refreshing the readable CSRF cookie on the way past.
+
+    `/auth/me` is what a reloaded page calls to find out who it is. The server keeps only a digest
+    of the CSRF token, so it cannot hand the token back — the readable cookie carries it instead,
+    and this refresh keeps that cookie's lifetime in step with the session's.
+    """
     memberships = workspace_memberships(
         WorkspaceRepository(auth.db).list_for_user(user_id=auth_ctx.user.id)
     )
+    existing = request.cookies.get(CSRF_COOKIE)
+    if existing and settings.csrf_enabled:
+        _set_csrf_cookie(response, settings, existing)
     return UserOut.from_model(auth_ctx.user, memberships)

@@ -70,6 +70,63 @@ class TestProjectCrud:
         )
         assert resp.status_code == 422
 
+    def test_list_includes_a_project_that_has_a_source(self, alice: Actor):
+        """Regression: the list route serialised the ORM directly, so `SourceVideo.sha256` (bytes)
+        failed to validate as a string. Every existing test listed a source-less project, so the
+        500 only appeared once a project actually had one — which is the normal case."""
+        from pathlib import Path
+
+        fixture = Path(__file__).resolve().parents[1] / "fixtures" / "generated" / "real_speech.mp4"
+        if not fixture.exists():
+            import pytest
+
+            pytest.skip("speech fixture missing")
+
+        project = alice.create_project()
+        with fixture.open("rb") as fh:
+            upload = alice.client.post(
+                f"/api/v1/workspaces/{alice.workspace_id}/projects/{project['id']}/sources",
+                files={"file": ("real_speech.mp4", fh, "video/mp4")},
+                data={
+                    "rights_basis": "original",
+                    "rights_statement": "I recorded this footage myself and own all rights.",
+                },
+                headers=alice.headers,
+            )
+        assert upload.status_code == 201, upload.text
+
+        listing = alice.client.get(f"/api/v1/workspaces/{alice.workspace_id}/projects")
+        assert listing.status_code == 200, listing.text
+        item = next(p for p in listing.json()["items"] if p["id"] == project["id"])
+        assert item["source"] is not None
+        assert isinstance(item["source"]["sha256"], str)
+        assert len(item["source"]["sha256"]) == 64, "a sha256 hex digest is 64 characters"
+
+    def test_dashboard_survives_a_project_with_a_source(self, alice: Actor):
+        """The same bytes-vs-string fault hit the dashboard's recent-projects list."""
+        from pathlib import Path
+
+        fixture = Path(__file__).resolve().parents[1] / "fixtures" / "generated" / "real_speech.mp4"
+        if not fixture.exists():
+            import pytest
+
+            pytest.skip("speech fixture missing")
+        project = alice.create_project()
+        with fixture.open("rb") as fh:
+            alice.client.post(
+                f"/api/v1/workspaces/{alice.workspace_id}/projects/{project['id']}/sources",
+                files={"file": ("real_speech.mp4", fh, "video/mp4")},
+                data={
+                    "rights_basis": "original",
+                    "rights_statement": "I recorded this footage myself and own all rights.",
+                },
+                headers=alice.headers,
+            )
+        resp = alice.client.get(f"/api/v1/workspaces/{alice.workspace_id}/dashboard")
+        assert resp.status_code == 200, resp.text
+        body = resp.json()
+        assert isinstance(body["recent_projects"], list)
+
     def test_delete_is_soft_and_hides_project(self, alice: Actor):
         project = alice.create_project()
         resp = alice.client.delete(

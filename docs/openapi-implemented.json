@@ -854,7 +854,7 @@
           },
           "recent_projects": {
             "items": {
-              "$ref": "#/components/schemas/ProjectOut"
+              "$ref": "#/components/schemas/_ProjectOutWithSource"
             },
             "title": "Recent Projects",
             "type": "array"
@@ -1472,152 +1472,11 @@
         "title": "ProjectDetail",
         "type": "object"
       },
-      "ProjectOut": {
-        "properties": {
-          "budget_usd": {
-            "anyOf": [
-              {
-                "type": "number"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Budget Usd"
-          },
-          "caption_style_key": {
-            "title": "Caption Style Key",
-            "type": "string"
-          },
-          "clips_requested": {
-            "title": "Clips Requested",
-            "type": "integer"
-          },
-          "cost_usd": {
-            "default": 0,
-            "title": "Cost Usd",
-            "type": "number"
-          },
-          "created_at": {
-            "format": "date-time",
-            "title": "Created At",
-            "type": "string"
-          },
-          "error_code": {
-            "anyOf": [
-              {
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Error Code"
-          },
-          "error_detail": {
-            "anyOf": [
-              {
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Error Detail"
-          },
-          "id": {
-            "format": "uuid",
-            "title": "Id",
-            "type": "string"
-          },
-          "language": {
-            "title": "Language",
-            "type": "string"
-          },
-          "max_duration_ms": {
-            "title": "Max Duration Ms",
-            "type": "integer"
-          },
-          "min_duration_ms": {
-            "title": "Min Duration Ms",
-            "type": "integer"
-          },
-          "name": {
-            "title": "Name",
-            "type": "string"
-          },
-          "progress": {
-            "anyOf": [
-              {
-                "type": "integer"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Progress"
-          },
-          "publishing_mode": {
-            "title": "Publishing Mode",
-            "type": "string"
-          },
-          "source": {
-            "anyOf": [
-              {
-                "$ref": "#/components/schemas/SourceOut"
-              },
-              {
-                "type": "null"
-              }
-            ]
-          },
-          "status": {
-            "title": "Status",
-            "type": "string"
-          },
-          "target_platform": {
-            "title": "Target Platform",
-            "type": "string"
-          },
-          "template_key": {
-            "title": "Template Key",
-            "type": "string"
-          },
-          "updated_at": {
-            "format": "date-time",
-            "title": "Updated At",
-            "type": "string"
-          },
-          "workspace_id": {
-            "format": "uuid",
-            "title": "Workspace Id",
-            "type": "string"
-          }
-        },
-        "required": [
-          "id",
-          "workspace_id",
-          "name",
-          "status",
-          "language",
-          "target_platform",
-          "clips_requested",
-          "min_duration_ms",
-          "max_duration_ms",
-          "template_key",
-          "caption_style_key",
-          "publishing_mode",
-          "created_at",
-          "updated_at"
-        ],
-        "title": "ProjectOut",
-        "type": "object"
-      },
       "ProjectPage": {
         "properties": {
           "items": {
             "items": {
-              "$ref": "#/components/schemas/ProjectOut"
+              "$ref": "#/components/schemas/_ProjectOutWithSource"
             },
             "title": "Items",
             "type": "array"
@@ -2404,6 +2263,148 @@
         ],
         "title": "WorkspaceRef",
         "type": "object"
+      },
+      "_ProjectOutWithSource": {
+        "description": "`ProjectOut` with a source-normalising constructor.\n\nThe ORM's `SourceVideo.sha256` is bytes, so validating a `Project` that has a source fails at\nserialisation time. `from_model` is the only supported way to build this on the wire.",
+        "properties": {
+          "budget_usd": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Budget Usd"
+          },
+          "caption_style_key": {
+            "title": "Caption Style Key",
+            "type": "string"
+          },
+          "clips_requested": {
+            "title": "Clips Requested",
+            "type": "integer"
+          },
+          "cost_usd": {
+            "default": 0,
+            "title": "Cost Usd",
+            "type": "number"
+          },
+          "created_at": {
+            "format": "date-time",
+            "title": "Created At",
+            "type": "string"
+          },
+          "error_code": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Error Code"
+          },
+          "error_detail": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Error Detail"
+          },
+          "id": {
+            "format": "uuid",
+            "title": "Id",
+            "type": "string"
+          },
+          "language": {
+            "title": "Language",
+            "type": "string"
+          },
+          "max_duration_ms": {
+            "title": "Max Duration Ms",
+            "type": "integer"
+          },
+          "min_duration_ms": {
+            "title": "Min Duration Ms",
+            "type": "integer"
+          },
+          "name": {
+            "title": "Name",
+            "type": "string"
+          },
+          "progress": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Progress"
+          },
+          "publishing_mode": {
+            "title": "Publishing Mode",
+            "type": "string"
+          },
+          "source": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/SourceOut"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "status": {
+            "title": "Status",
+            "type": "string"
+          },
+          "target_platform": {
+            "title": "Target Platform",
+            "type": "string"
+          },
+          "template_key": {
+            "title": "Template Key",
+            "type": "string"
+          },
+          "updated_at": {
+            "format": "date-time",
+            "title": "Updated At",
+            "type": "string"
+          },
+          "workspace_id": {
+            "format": "uuid",
+            "title": "Workspace Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "workspace_id",
+          "name",
+          "status",
+          "language",
+          "target_platform",
+          "clips_requested",
+          "min_duration_ms",
+          "max_duration_ms",
+          "template_key",
+          "caption_style_key",
+          "publishing_mode",
+          "created_at",
+          "updated_at"
+        ],
+        "title": "ProjectOut",
+        "type": "object"
       }
     }
   },
@@ -2532,6 +2533,7 @@
     },
     "/api/v1/auth/me": {
       "get": {
+        "description": "The signed-in user, refreshing the readable CSRF cookie on the way past.\n\n`/auth/me` is what a reloaded page calls to find out who it is. The server keeps only a digest\nof the CSRF token, so it cannot hand the token back \u2014 the readable cookie carries it instead,\nand this refresh keeps that cookie's lifetime in step with the session's.",
         "operationId": "get_me_api_v1_auth_me_get",
         "parameters": [
           {
@@ -4250,7 +4252,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/ProjectOut"
+                  "$ref": "#/components/schemas/_ProjectOutWithSource"
                 }
               }
             },
@@ -4538,7 +4540,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/ProjectOut"
+                  "$ref": "#/components/schemas/_ProjectOutWithSource"
                 }
               }
             },

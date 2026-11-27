@@ -247,3 +247,44 @@ class TestRenderPlan:
         )
         assert plan.has_captions is False
         assert plan.to_dict()["captions"]["burned"] is False
+
+
+class TestStructuredLogging:
+    """`logger.info(extra={...})` silently reserves a set of attribute names.
+
+    Passing a reserved name raises `KeyError` inside `makeRecord`, which is not a logging failure
+    but a raised exception in the calling function — so a generate that had already written its rows
+    would return 500. `created` was exactly this bug.
+    """
+
+    RESERVED = frozenset({
+        "name", "msg", "args", "levelname", "levelno", "pathname", "filename", "module",
+        "exc_info", "exc_text", "stack_info", "lineno", "funcName", "created", "msecs",
+        "relativeCreated", "thread", "threadName", "processName", "process", "message",
+        "asctime", "taskName",
+    })
+
+    def test_no_log_call_uses_a_reserved_extra_key(self):
+        import pathlib
+        import re
+
+        pattern = re.compile(r"extra=\{([^}]*)\}", re.S)
+        key = re.compile(r'"([A-Za-z_]+)"\s*:')
+        offenders: list[str] = []
+        app_dir = pathlib.Path(__file__).resolve().parents[2] / "app"
+        for path in app_dir.rglob("*.py"):
+            for match in pattern.finditer(path.read_text()):
+                for name in key.findall(match.group(1)):
+                    if name in self.RESERVED:
+                        offenders.append(f"{path.name}: {name}")
+        assert not offenders, f"reserved LogRecord keys used as extra= fields: {offenders}"
+
+    def test_logging_with_the_reported_keys_does_not_raise(self):
+        import logging
+
+        record = logging.getLogger("test").makeRecord(
+            "test", logging.INFO, __file__, 1, "msg", (), None, None,
+            extra={"project_id": "p", "created_count": 1, "existing_count": 0},
+            sinfo=None,
+        )
+        assert record.created_count == 1
