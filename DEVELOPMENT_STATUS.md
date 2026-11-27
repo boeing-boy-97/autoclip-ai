@@ -109,9 +109,37 @@ while logging `media_tooling_missing`, `asr_model_cache_missing`, `docs_enabled_
 `MIGRATE_ON_START=true` aborted before serving. `backend/tests/unit/test_deploy.py` (36 tests) locks
 all of that in.
 
-Not verified, stated plainly: no real platform build, no PostgreSQL in this sandbox, so migrations
-have never been applied against a live database here, and no FFmpeg, so media paths were not
-exercised. The Dockerfile was reviewed line by line, not built.
+### 0B. The CI pipeline is green (2026-11-27)
+
+Every job on this branch passes: unit, integration (real PostgreSQL 17 + Redis + FFmpeg),
+frontend, security scan, no-fakes, and the contract job. The contract job had never passed — it was
+red on the branch's base commit too — and the reasons were all defects in the checks, not in the
+code:
+
+* `verify_invariants.sql` reports with `RAISE NOTICE`, which psql writes to **stderr**; the step
+  greped stdout, so it could never see a `PASS:`.
+* The step ran a bash script (`ops/scripts/phase0_verify.sh`) through `python3`.
+* `verify_schema.sh` and `verify_migrations.sh` reached PostgreSQL with `sudo -u postgres`, which is
+  how a developer's machine works and never how CI's service container is reached. Both prefer
+  `PGHOST`/`PGUSER` now and fall back to the sudo path.
+* The drift check's scratch role could not install the extensions the baseline migration creates.
+* A stale assertion still required four worker services that were deleted with the queues that had
+  no tasks, and the "no fake behaviour" grep pointed at `app/` instead of `backend/app/` — it passed
+  vacuously.
+* `bandit` flagged the deliberate `/tmp/autoclip` scratch default; it reads `# nosec`, not ruff's
+  `# noqa`.
+* `docker compose config` cannot run without `.env`, which is gitignored; the job now generates one
+  with the same script developers use.
+
+The drift check is now real: it builds one database from `alembic upgrade head` and one from
+`schema.sql`, dumps both, and diffs them — 1037 identical lines, no drift. Its failures also emit
+GitHub annotations, so a future red check is readable from the PR instead of from a log nobody can
+open.
+
+Not verified, stated plainly: no real platform build (no Docker here). Migrations *were* now
+verified against a real PostgreSQL 16 server in this sandbox — the baseline applies, downgrades and
+re-applies cleanly, and matches `schema.sql` — and CI runs the same check against PostgreSQL 17.
+FFmpeg was still absent locally, so media paths were only exercised by CI.
 
 ---
 
