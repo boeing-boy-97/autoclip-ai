@@ -10,11 +10,17 @@ SCHEMA="${REPO_ROOT}/docs/database/schema.sql"
 INVARIANTS="${REPO_ROOT}/docs/database/verify_invariants.sql"
 DB="${SCHEMA_TEST_DB:-autoclip_schema_test}"
 PGBIN="${PGBIN:-/usr/lib/postgresql/17/bin}"
-PSQL="${PGBIN}/psql -p ${PGPORT:-5432}"
 KEEP=0
 [[ "${1:-}" == "--keep" ]] && KEEP=1
 
-run_pg() { sudo -n -u postgres ${PSQL} "$@"; }
+# Which psql talks to the cluster?
+#   * PGHOST/PGUSER work  -> use them: CI service containers, docker compose, a remote server
+#   * otherwise           -> the developer's local cluster through the `postgres` OS user
+if psql -X -q -At -c 'SELECT 1' -d postgres >/dev/null 2>&1; then
+  run_pg() { psql "$@"; }
+else
+  run_pg() { sudo -n -u "${PGSUPERUSER:-postgres}" "${PGBIN}/psql" -p "${PGPORT:-5432}" "$@"; }
+fi
 
 echo "==> dropping and recreating ${DB}"
 run_pg -c "DROP DATABASE IF EXISTS ${DB};" >/dev/null

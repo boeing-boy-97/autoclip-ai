@@ -16,24 +16,39 @@ PGBIN="${PGBIN:-/usr/lib/postgresql/17/bin}"
 PGPORT="${PGPORT:-5432}"
 DB_MIG="${DB_MIG:-autoclip_drift_migrated}"
 DB_REF="${DB_REF:-autoclip_drift_reference}"
-PSQL_SUPER="sudo -n -u postgres ${PGBIN}/psql -p ${PGPORT}"
+DB_USER="${DB_USER:-autoclip}"
+DB_PASS="${DB_PASS:-autoclip}"
+DB_HOST="${DB_HOST:-127.0.0.1}"
 KEEP=0
 [[ "${1:-}" == "--keep" ]] && KEEP=1
+
+# Which psql talks to the cluster? Prefer PGHOST/PGUSER when they work (CI, compose, a remote
+# server); otherwise fall back to the developer's local cluster via the `postgres` OS user.
+if psql -X -q -At -c 'SELECT 1' -d postgres >/dev/null 2>&1; then
+  run_pg() { psql "$@"; }
+else
+  run_pg() { sudo -n -u "${PGSUPERUSER:-postgres}" "${PGBIN}/psql" -p "${PGPORT}" "$@"; }
+fi
 
 log() { printf '\033[1m▶ %s\033[0m\n' "$1"; }
 ok()  { printf '  \033[32m✓ %s\033[0m\n' "$1"; }
 bad() { printf '  \033[31m✗ %s\033[0m\n' "$1"; }
 
 log "creating two empty databases"
-${PSQL_SUPER} -c "DROP DATABASE IF EXISTS ${DB_MIG} WITH (FORCE);" >/dev/null
-${PSQL_SUPER} -c "DROP DATABASE IF EXISTS ${DB_REF} WITH (FORCE);" >/dev/null
-${PSQL_SUPER} -c "CREATE DATABASE ${DB_MIG} OWNER autoclip;" >/dev/null
-${PSQL_SUPER} -c "CREATE DATABASE ${DB_REF} OWNER autoclip;" >/dev/null
+# The migration runs as an ordinary role, not the superuser, so it has to exist.
+if ! run_pg -tAc "SELECT 1 FROM pg_roles WHERE rolname='${DB_USER}'" | grep -q 1; then
+  run_pg -c "CREATE ROLE ${DB_USER} LOGIN PASSWORD '${DB_PASS}';" >/dev/null
+  ok "created role ${DB_USER}"
+fi
+run_pg -c "DROP DATABASE IF EXISTS ${DB_MIG} WITH (FORCE);" >/dev/null
+run_pg -c "DROP DATABASE IF EXISTS ${DB_REF} WITH (FORCE);" >/dev/null
+run_pg -c "CREATE DATABASE ${DB_MIG} OWNER ${DB_USER};" >/dev/null
+run_pg -c "CREATE DATABASE ${DB_REF} OWNER ${DB_USER};" >/dev/null
 
 # Reference DB: extensions then schema.sql verbatim (as a superuser, so extensions install).
-${PSQL_SUPER} -d "${DB_REF}" -q \
+run_pg -d "${DB_REF}" -q \
   -c "CREATE EXTENSION IF NOT EXISTS citext; CREATE EXTENSION IF NOT EXISTS vector; CREATE EXTENSION IF NOT EXISTS pgcrypto;" >/dev/null
-if ! ${PSQL_SUPER} -d "${DB_REF}" -v ON_ERROR_STOP=1 -q < "${REPO_ROOT}/docs/database/schema.sql" 2>&1 | grep -Ei 'error|fatal'; then
+if ! run_pg -d "${DB_REF}" -v ON_ERROR_STOP=1 -q < "${REPO_ROOT}/docs/database/schema.sql" 2>&1 | grep -Ei 'error|fatal'; then
   ok "schema.sql applied to reference database"
 else
   bad "schema.sql failed to apply"; exit 1
@@ -45,7 +60,7 @@ cd "${REPO_ROOT}/backend"
 export SECRET_KEY="${SECRET_KEY:-$(python3 -c 'import os,base64;print(base64.b64encode(os.urandom(32)).decode())')}"
 export SECRET_ENCRYPTION_KEY="${SECRET_ENCRYPTION_KEY:-$(python3 -c 'import os,base64;print(base64.b64encode(os.urandom(32)).decode())')}"
 export PASSWORD_PEPPER="${PASSWORD_PEPPER:-drift-check-pepper-value-1234}"
-export DATABASE_URL="postgresql+psycopg://autoclip:autoclip@127.0.0.1:${PGPORT}/${DB_MIG}"
+export DATABASE_URL="postgresql+psycopg://${DB_USER}:${DB_PASS}@${DB_HOST}:${PGPORT}/${DB_MIG}"
 export REDIS_URL="redis://127.0.0.1:6379/0"
 export STORAGE_BACKEND=local
 if python3 -m alembic upgrade head >/tmp/drift_upgrade.log 2>&1; then
@@ -56,7 +71,7 @@ fi
 
 log "round-trip: downgrade base then upgrade head again"
 if python3 -m alembic downgrade base >/tmp/drift_down.log 2>&1; then
-  remaining=$(${PSQL_SUPER} -d "${DB_MIG}" -tAc \
+  remaining=$(run_pg -d "${DB_MIG}" -tAc \
     "SELECT count(*) FROM information_schema.tables WHERE table_schema='public' AND table_type='BASE TABLE'")
   # alembic_version is recreated/kept by alembic itself; 0 or 1 is acceptable.
   if [[ "${remaining}" -le 1 ]]; then ok "downgrade removed all domain tables (${remaining} bookkeeping table left)";
@@ -114,8 +129,8 @@ else
 fi
 
 if [[ ${KEEP} -eq 0 ]]; then
-  ${PSQL_SUPER} -c "DROP DATABASE IF EXISTS ${DB_MIG} WITH (FORCE);" >/dev/null
-  ${PSQL_SUPER} -c "DROP DATABASE IF EXISTS ${DB_REF} WITH (FORCE);" >/dev/null
+  run_pg -c "DROP DATABASE IF EXISTS ${DB_MIG} WITH (FORCE);" >/dev/null
+  run_pg -c "DROP DATABASE IF EXISTS ${DB_REF} WITH (FORCE);" >/dev/null
   echo "  dropped scratch databases"
 fi
 printf '\n\033[32m✅ migrations verified\033[0m\n'

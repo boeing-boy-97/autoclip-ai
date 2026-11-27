@@ -117,8 +117,13 @@ jobs:
             echo "::error title=verify_invariants.sql asserted nothing::exit=$inv_rc output=$(head -3 /tmp/inv.log | tr '\n' ' ' | cut -c1-350)"
             exit 1
           fi
+      # A bash script, not Python — calling it with python3 only ever produced a SyntaxError.
       - name: Config file validity
-        run: python3 ops/scripts/phase0_verify.sh
+        env:
+          PGHOST: localhost
+          PGUSER: postgres
+          PGPASSWORD: postgres
+        run: bash ops/scripts/phase0_verify.sh
       - name: Migration matches schema.sql
         env:
           PGHOST: localhost
