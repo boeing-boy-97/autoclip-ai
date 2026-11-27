@@ -34,7 +34,7 @@ jobs:
         run: mypy app/ --ignore-missing-imports
       - name: bandit
         run: bandit -r backend/app -ll -x backend/tests
-      - name: Generate a development .env (compose reads env_file: [.env])
+      - name: Generate a development .env file (compose reads env_file)
         run: ./ops/scripts/dev_env.sh
       - name: Compose file is valid and uses the real worker module
         run: |
