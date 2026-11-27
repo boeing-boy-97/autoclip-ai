@@ -109,7 +109,7 @@ export function ClipCard({ clip, workspaceId, onChange }: Props) {
               controls
               playsInline
               preload="metadata"
-              src={`${base}/media?v=${clip.current_version_id}`}
+              src={`${base}/media?version_id=${clip.current_version_id}`}
               aria-label={`Preview of ${clip.title}`}
             />
           ) : (
@@ -171,7 +171,7 @@ export function ClipCard({ clip, workspaceId, onChange }: Props) {
 
           <div className="row wrap" style={{ gap: 8 }}>
             {current && (
-              <a className="btn btn-sm" href={`${base}/media?download=true`}>
+              <a className="btn btn-sm" href={`${base}/media?download=true&version_id=${clip.current_version_id}`}>
                 Download MP4
               </a>
             )}

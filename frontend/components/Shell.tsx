@@ -15,7 +15,7 @@ const NAV = [
 const PUBLIC_PATHS = ["/login", "/register"];
 
 export function Shell({ children }: { children: React.ReactNode }) {
-  const { status, workspace, workspaces, logout, selectWorkspace } = useSession();
+  const { status, error: sessionError, refresh, workspace, workspaces, logout, selectWorkspace } = useSession();
   const [logoutError, setLogoutError] = useState<string | null>(null);
   const [signingOut, setSigningOut] = useState(false);
   const pathname = usePathname();
@@ -37,6 +37,13 @@ export function Shell({ children }: { children: React.ReactNode }) {
         </div>
       </div>
     );
+  }
+
+  if (status === "error") {
+    return <div className="centre-screen"><div className="card stack" role="alert">
+      <p>{sessionError}</p>
+      <button className="btn" onClick={() => void refresh()}>Retry connection</button>
+    </div></div>;
   }
 
   if (status === "anonymous") {
@@ -99,7 +106,7 @@ export function Shell({ children }: { children: React.ReactNode }) {
         </div>
       </aside>
 
-      <main className="main" key={workspace?.id}>{children}</main>
+      <main className="main" key={`${workspace?.id}:${pathname}`}>{children}</main>
     </div>
   );
 }

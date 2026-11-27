@@ -22,9 +22,11 @@ import uuid
 from datetime import UTC, datetime, timedelta
 
 from celery.exceptions import SoftTimeLimitExceeded
-from sqlalchemy import select
+from sqlalchemy import func, select
 
+from app.db.locks import project_execution
 from app.db.models import ProcessingJob
+from app.db.repositories import JobInterruptedError, JobRepository
 from app.db.session import session_scope
 from app.services.analysis import AnalysisError, AnalysisService
 from app.services.storage import get_storage
@@ -69,7 +71,14 @@ def run_analysis(
     )
 
     try:
-        with session_scope() as db:
+        with project_execution(ws, pid) as acquired, session_scope() as db:
+            if not acquired:
+                return {"job_id": str(jid), "skipped": "project_busy"}
+            job = JobRepository(db).get(workspace_id=ws, job_id=jid)
+            if job.celery_task_id and job.celery_task_id != self.request.id:
+                return {"job_id": str(jid), "skipped": "stale_delivery"}
+            if job.project_id != pid or job.status not in {"PENDING", "RETRYING"}:
+                return {"job_id": str(jid), "skipped": job.status.lower()}
             settings = _settings()
             service = AnalysisService(db, settings, get_storage(settings))
             outcome = service.analyse(
@@ -85,6 +94,9 @@ def run_analysis(
                 "elapsed_seconds": outcome.elapsed_seconds,
             }
 
+    except JobInterruptedError:
+        return {"job_id": str(jid), "skipped": "cancelled_or_retired"}
+
     except SoftTimeLimitExceeded:
         # Celery kills the task after the hard limit; record something useful first.
         _record_terminal_failure(jid, ws, "analysis_timeout", "task exceeded its time limit")
@@ -98,7 +110,8 @@ def run_analysis(
                 "asr unavailable; retrying",
                 extra={"project_id": str(pid), "retry_in": delay, "detail": exc.detail},
             )
-            raise self.retry(exc=exc, countdown=delay) from exc
+            if _mark_retrying(jid, ws, delay):
+                raise self.retry(exc=exc, countdown=delay) from exc
         raise
 
     except AnalysisError as exc:
@@ -110,7 +123,8 @@ def run_analysis(
                 "analysis failed with retryable code; retrying",
                 extra={"project_id": str(pid), "code": exc.code, "retry_in": delay},
             )
-            raise self.retry(exc=exc, countdown=delay) from exc
+            if _mark_retrying(jid, ws, delay):
+                raise self.retry(exc=exc, countdown=delay) from exc
         logger.error(
             "analysis failed permanently",
             extra={"project_id": str(pid), "code": exc.code, "detail": exc.detail},
@@ -143,15 +157,40 @@ def sweep_stuck_jobs() -> dict:
         rows = list(
             db.scalars(
                 select(ProcessingJob).where(
-                    ProcessingJob.status == "RUNNING",
-                    ProcessingJob.heartbeat_at.is_not(None),
-                    ProcessingJob.heartbeat_at < cutoff,
+                    ((ProcessingJob.status == "RUNNING") & (ProcessingJob.heartbeat_at < cutoff))
+                    | (
+                        (ProcessingJob.status.in_(["PENDING", "RETRYING"]))
+                        & (
+                            func.coalesce(
+                                ProcessingJob.next_retry_at,
+                                ProcessingJob.heartbeat_at,
+                                ProcessingJob.created_at,
+                            )
+                            < cutoff
+                        )
+                    ),
                 )
             )
         )
         for job in rows:
+            if job.project_id is not None:
+                # No live worker may own the project, even if an ASR call ran longer than
+                # the heartbeat cutoff. A connection crash releases the execution lock.
+                from app.db.locks import guard_project  # noqa: PLC0415
+                from app.db.repositories import ConflictError  # noqa: PLC0415
+
+                try:
+                    guard_project(db, job.workspace_id, job.project_id)
+                except ConflictError:
+                    continue
+            db.refresh(job, with_for_update=True)
+            if job.status not in {"RUNNING", "PENDING", "RETRYING"}:
+                continue
+            if job.status == "RUNNING" and job.heartbeat_at and job.heartbeat_at >= cutoff:
+                continue
+            was_pending = job.status in {"PENDING", "RETRYING"}
             job.status = "DEAD_LETTER"
-            job.error_code = "worker_lost"
+            job.error_code = "queue_wait_timeout" if was_pending else "worker_lost"
             last_seen = job.heartbeat_at.isoformat() if job.heartbeat_at else "never"
             job.error_detail = (
                 f"no heartbeat since {last_seen}; the worker was most likely killed. "
@@ -193,3 +232,14 @@ def _record_terminal_failure(
             )
     except Exception:
         logger.exception("could not record terminal failure", extra={"job_id": str(job_id)})
+
+
+def _mark_retrying(job_id: uuid.UUID, workspace_id: uuid.UUID, delay: int) -> bool:
+    with session_scope() as db:
+        job = JobRepository(db)._locked(workspace_id, job_id)
+        if job.status != "FAILED":
+            return False
+        job.status = "RETRYING"
+        job.finished_at = None
+        job.next_retry_at = datetime.now(UTC) + timedelta(seconds=delay)
+        return True

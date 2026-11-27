@@ -98,7 +98,11 @@ def test_restoring_a_version_does_not_bypass_qa():
     from app.services.clips import ClipService
 
     clip = SimpleNamespace(
-        current_version_id=uuid.uuid4(), state="REJECTED", publishable=True, meta={}
+        current_version_id=uuid.uuid4(),
+        project_id=uuid.uuid4(),
+        state="REJECTED",
+        publishable=True,
+        meta={},
     )
     version = SimpleNamespace(id=uuid.uuid4(), video_asset_id=uuid.uuid4(), version_no=1)
     service = ClipService.__new__(ClipService)

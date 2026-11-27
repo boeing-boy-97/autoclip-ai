@@ -25,14 +25,23 @@ export default function ProjectsPage() {
   const [projects, setProjects] = useState<Project[] | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [creating, setCreating] = useState(false);
+  const [nextCursor, setNextCursor] = useState<string | null>(null);
+  const [loadingMore, setLoadingMore] = useState(false);
 
-  const load = useCallback(async (workspaceId: string) => {
+  const load = useCallback(async (workspaceId: string, cursor?: string) => {
+    setLoadingMore(true);
     try {
-      const page = await api<Page<Project>>(`/api/v1/workspaces/${workspaceId}/projects`);
-      setProjects(page.items);
+      const query = cursor ? `?cursor=${encodeURIComponent(cursor)}` : "";
+      const page = await api<Page<Project>>(`/api/v1/workspaces/${workspaceId}/projects${query}`);
+      setProjects((previous) => cursor
+        ? [...(previous ?? []), ...page.items.filter((item) => !previous?.some((row) => row.id === item.id))]
+        : page.items);
+      setNextCursor(page.next_cursor ?? null);
       setError(null);
     } catch (err) {
       setError(err instanceof ApiError ? err.detail : "Could not load projects.");
+    } finally {
+      setLoadingMore(false);
     }
   }, []);
 
@@ -72,7 +81,7 @@ export default function ProjectsPage() {
       <div className="card">
         <div className="card-head">
           <h2 style={{ margin: 0 }}>All projects</h2>
-          {projects && <span className="faint">{projects.length} total</span>}
+          {projects && <span className="faint">{projects.length} loaded</span>}
         </div>
         {!projects ? (
           <SkeletonRows rows={4} />
@@ -102,6 +111,10 @@ export default function ProjectsPage() {
             ))}
           </div>
         )}
+        {nextCursor && <button className="btn" disabled={loadingMore}
+          onClick={() => void load(workspace.id, nextCursor)}>
+          {loadingMore ? "Loading…" : "Load more projects"}
+        </button>}
       </div>
     </div>
   );

@@ -261,3 +261,14 @@ If the platform cannot build a Dockerfile:
 | Migrations ran twice / deadlocked | migrations launched from the web process | use the release hook (§4) |
 | Occasional `502` on the first request after an idle spell | `UVICORN_KEEP_ALIVE` shorter than the proxy's idle timeout: the server closed a connection the proxy still reuses | leave it at the 75 s default, or raise it above the platform's idle timeout |
 | `... : uvicorn: not found` in the deploy log | the image/PATH has no console scripts (some buildpacks) | the scripts call `python -m uvicorn` / `python -m celery`; if `python` is not the interpreter, set `PYTHON_BIN=python3` |
+
+
+### Runtime PostgreSQL pooling requirement
+
+Project analysis/render execution uses session-level PostgreSQL advisory locks on a dedicated
+connection, held across checkpoint commits. `DATABASE_URL` **must be direct or session-pooled**;
+transaction-pooling proxies are unsupported for these execution paths. Setting only
+`DATABASE_URL_MIGRATIONS`/`DATABASE_URL_UNPOOLED` does not alter the runtime connection. Budget one
+extra database connection per active execution and test failover and worker-loss recovery before
+production. The sweeper requires Celery beat and surfaces abandoned work for explicit retry; it
+is not a transactional broker outbox.

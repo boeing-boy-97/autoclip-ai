@@ -29,10 +29,13 @@ from sqlalchemy.orm import Session
 
 from app.core.config import Settings
 from app.core.stage_graph import PIPELINE_ORDER, TERMINAL_STAGES, ProjectStage
+from app.db.locks import guard_project
 from app.db.models import (
     CandidateMoment,
     CandidateScore,
+    Clip,
     MediaAsset,
+    ProcessingJob,
     Project,
     Scene,
     Speaker,
@@ -43,6 +46,7 @@ from app.db.models import (
 from app.db.repositories import (
     AuditRepository,
     ConflictError,
+    JobInterruptedError,
     JobRepository,
     ProjectRepository,
     SourceRepository,
@@ -201,12 +205,39 @@ class AnalysisService:
         project beyond the analysis stages. Callers can therefore surface a precise 4xx *before*
         enqueuing anything, rather than enqueueing a request doomed to fail minutes later.
         """
+        guard_project(self.db, workspace_id, project_id)
         project = self.projects.get(workspace_id=workspace_id, project_id=project_id)
         source = self.sources.for_project(workspace_id=workspace_id, project_id=project_id)
         if source is None or source.state != "ready":
             raise AnalysisError(
                 "source_not_ready",
                 "this project has no ready source video; upload one before analysing",
+                status_code=409,
+            )
+
+        active = self.db.scalar(
+            select(ProcessingJob)
+            .where(
+                ProcessingJob.workspace_id == workspace_id,
+                ProcessingJob.project_id == project_id,
+                ProcessingJob.status.in_(["PENDING", "RUNNING", "RETRYING"]),
+            )
+            .limit(1)
+        )
+        if active is not None:
+            if force:
+                raise AnalysisError(
+                    "project_busy", "analysis is already queued or running", status_code=409
+                )
+            self.db.commit()
+            return AnalysisPlan(
+                job_id=active.id, reused=False, fingerprint=active.input_fingerprint or ""
+            )
+
+        if force and self.db.scalar(select(Clip.id).where(Clip.project_id == project_id).limit(1)):
+            raise AnalysisError(
+                "analysis_has_clips",
+                "analysis cannot replace transcripts after clips exist; create a new project",
                 status_code=409,
             )
 
@@ -220,7 +251,7 @@ class AnalysisService:
         # MOMENT_DETECTION is the end of the analysis band, so an earlier completed run may be
         # repeated. Any state beyond it means real work exists downstream of analysis and repeating
         # it would discard results, so it is refused explicitly.
-        if project.status not in _REPEATABLE_STATUSES and not force:
+        if project.status not in _REPEATABLE_STATUSES:
             raise AnalysisError(
                 "analysis_not_repeatable",
                 f"project is in {project.status}; analysis can only run while the project is "
@@ -278,6 +309,13 @@ class AnalysisService:
                 status_code=409,
             )
 
+        if force and self.db.scalar(select(Clip.id).where(Clip.project_id == project_id).limit(1)):
+            raise AnalysisError(
+                "analysis_has_clips",
+                "analysis cannot replace transcripts after clips exist; create a new project",
+                status_code=409,
+            )
+
         config = _load_scoring_config(self.settings)
         # A forced re-run must bypass the idempotency key, so the fingerprint is salted. Without
         # this, `force=true` was accepted by the API and then silently ignored — the worst kind of
@@ -296,7 +334,7 @@ class AnalysisService:
         # MOMENT_DETECTION is the end of the analysis band, so an earlier completed run may be
         # repeated. Any state beyond it means real work exists downstream of analysis and repeating
         # it would discard results, so it is refused explicitly.
-        if project.status not in _REPEATABLE_STATUSES and not force:
+        if project.status not in _REPEATABLE_STATUSES:
             raise AnalysisError(
                 "analysis_not_repeatable",
                 f"project is in {project.status}; analysis can only run while the project is "
@@ -435,6 +473,9 @@ class AnalysisService:
                 reused=False,
                 elapsed_seconds=round(time.monotonic() - started, 3),
             )
+        except JobInterruptedError:
+            self.db.rollback()
+            raise
         except (AsrUnavailableError, AsrFailedError) as exc:
             self._record_failure(
                 job_ref,
@@ -467,13 +508,14 @@ class AnalysisService:
     # ------------------------------------------------------------------ stages
     def _materialise_source(self, source, scratch: Path) -> Path:  # noqa: ANN001
         """Fetch the stored object to local scratch if the storage backend is remote."""
-        local = Path(self.settings.local_storage_root) / (source.storage_key or "")
-        if source.storage_key and local.exists():
-            return local
         if not source.storage_key:
             raise AnalysisError(
                 "source_not_ready", "source has no stored object to analyse", status_code=409
             )
+        from app.services.storage import LocalStorage  # noqa: PLC0415
+
+        if isinstance(self.storage, LocalStorage):
+            return self.storage._path(source.storage_key)
         target = scratch / "source"
         target.parent.mkdir(parents=True, exist_ok=True)
         with self.storage.open(source.storage_key) as src, target.open("wb") as dst:
@@ -895,11 +937,13 @@ class AnalysisService:
 
     def _mark_running(self, job_id: uuid.UUID, workspace_id: uuid.UUID) -> None:
         self.jobs.mark_running(workspace_id=workspace_id, job_id=job_id)
+        self.db.commit()
 
     def _set_progress(
         self, job_id: uuid.UUID, workspace_id: uuid.UUID, pct: int, note: str
     ) -> None:
         self.jobs.set_progress(workspace_id=workspace_id, job_id=job_id, progress=pct, note=note)
+        self.db.commit()
 
     def _finish_job(self, job_id: uuid.UUID, workspace_id: uuid.UUID, *, note: str) -> None:
         self.jobs.mark_succeeded(workspace_id=workspace_id, job_id=job_id, note=note)

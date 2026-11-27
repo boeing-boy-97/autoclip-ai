@@ -16,6 +16,7 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
+import re
 import subprocess
 import time
 from dataclasses import dataclass, field
@@ -70,6 +71,8 @@ class Template:
 
     @classmethod
     def load(cls, key: str, template_dir: str | Path = TEMPLATE_DIR_DEFAULT) -> Template:
+        if not re.fullmatch(r"[a-z][a-z0-9_]{0,63}", key):
+            raise RenderError("template_not_found", "invalid template key")
         path = resolve_template_dir(template_dir) / f"{key}.yaml"
         if not path.exists():
             raise RenderError("template_not_found", f"no template named {key!r}")
@@ -164,6 +167,8 @@ def probe_source_size(source: Path, ffprobe_bin: str = "ffprobe") -> tuple[int, 
             "stream=width,height",
             "-of",
             "json",
+            "-protocol_whitelist",
+            "file",
             str(source),
         ],
         timeout=60,
@@ -311,6 +316,8 @@ def render_clip(
         # what makes a 3-second clip of a long video take seconds rather than minutes.
         "-ss",
         f"{start_s:.3f}",
+        "-protocol_whitelist",
+        "file",
         "-i",
         str(source_path),
         "-t",

@@ -23,6 +23,10 @@ REDACTED = "***"
 def _redact_value(key: str, value: Any) -> Any:
     if REDACT_KEY_PATTERN.search(key):
         return REDACTED
+    if isinstance(value, dict):
+        return {str(k): _redact_value(str(k), v) for k, v in value.items()}
+    if isinstance(value, list | tuple):
+        return [_redact_value("", item) for item in value]
     if isinstance(value, str):
         value = SIGNED_URL_QUERY.sub(r"\1\2=REDACTED", value)
         return EMAIL.sub(r"\1***\2", value)
@@ -45,9 +49,9 @@ def configure_logging(*, level: str = "INFO", fmt: str = "json") -> None:
         structlog.stdlib.add_log_level,
         structlog.stdlib.add_logger_name,
         timestamper,
-        redaction_processor,
         structlog.processors.StackInfoRenderer(),
         structlog.processors.format_exc_info,
+        redaction_processor,
     ]
 
     renderer: Any = (

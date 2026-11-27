@@ -85,7 +85,11 @@ def database_url() -> Iterator[str]:
         with _admin_engine().connect() as conn:
             conn.execute(text(f'CREATE DATABASE "{name}"'))
     except Exception as exc:  # noqa: BLE001
-        pytest.skip(f"PostgreSQL unavailable for integration tests: {exc}")
+        if os.environ.get("TEST_REQUIRE_SERVICES") == "1":
+            pytest.fail(
+                f"PostgreSQL unavailable for required integration tests: {type(exc).__name__}"
+            )
+        pytest.skip(f"PostgreSQL unavailable for integration tests: {type(exc).__name__}")
 
     url = ADMIN_URL.rsplit("/", 1)[0] + f"/{name}"
     os.environ["DATABASE_URL"] = url
@@ -126,7 +130,9 @@ def redis_available() -> str:
         client.ping()
         client.close()
     except Exception as exc:  # noqa: BLE001
-        pytest.skip(f"Redis unavailable for integration tests: {exc}")
+        if os.environ.get("TEST_REQUIRE_SERVICES") == "1":
+            pytest.fail(f"Redis unavailable for required integration tests: {type(exc).__name__}")
+        pytest.skip(f"Redis unavailable for integration tests: {type(exc).__name__}")
     return REDIS_URL
 
 

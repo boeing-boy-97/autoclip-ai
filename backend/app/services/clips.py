@@ -26,6 +26,7 @@ from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from app.core.config import Settings
+from app.db.locks import guard_project, project_execution
 from app.db.models import (
     CandidateMoment,
     Clip,
@@ -112,6 +113,7 @@ class ClipService:
         user_id: uuid.UUID,  # noqa: ARG002 - recorded by the API layer, not needed here
     ) -> GenerateOutcome:
         """Create one clip per selected moment. Idempotent: existing clips are left alone."""
+        guard_project(self.db, workspace_id, project_id)
         project = self.projects.get(workspace_id=workspace_id, project_id=project_id)
         source = self.db.scalar(
             select(SourceVideo).where(
@@ -187,6 +189,33 @@ class ClipService:
 
     # ------------------------------------------------------------------ rendering
     def render(
+        self,
+        *,
+        workspace_id: uuid.UUID,
+        clip_id: uuid.UUID,
+        user_id: uuid.UUID | None = None,
+        template_key: str | None = None,
+        job_id: uuid.UUID | None = None,
+    ) -> RenderOutcome:
+        clip = self.clips.get(workspace_id=workspace_id, clip_id=clip_id)
+        with project_execution(workspace_id, clip.project_id) as acquired:
+            if not acquired:
+                raise ClipError(
+                    "project_busy", "project work is already executing", status_code=409
+                )
+            # A clip loaded before waiting/acquiring must not carry a stale version/state.
+            self.db.refresh(clip)
+            result = self._render(
+                workspace_id=workspace_id,
+                clip_id=clip_id,
+                user_id=user_id,
+                template_key=template_key,
+                job_id=job_id,
+            )
+            self.db.commit()
+            return result
+
+    def _render(
         self,
         *,
         workspace_id: uuid.UUID,
@@ -403,6 +432,8 @@ class ClipService:
         the record of what they judged. The rejected version stays in `clip_versions` forever.
         """
         clip = self.clips.get(workspace_id=workspace_id, clip_id=clip_id)
+        guard_project(self.db, workspace_id, clip.project_id)
+        self.db.refresh(clip)
         if clip.state in _UNREJECTABLE_STATES:
             raise ClipError(
                 "clip_not_rejectable",
@@ -442,6 +473,8 @@ class ClipService:
         restoring is a pointer move. That is the whole reason versions are append-only.
         """
         clip = self.clips.get(workspace_id=workspace_id, clip_id=clip_id)
+        guard_project(self.db, workspace_id, clip.project_id)
+        self.db.refresh(clip)
         version = self.clips.get_version(
             workspace_id=workspace_id, clip_id=clip_id, version_id=version_id
         )
@@ -543,9 +576,10 @@ class ClipService:
                 "the source video has no stored object to render from",
                 status_code=409,
             )
-        local = Path(self.settings.local_storage_root) / key
-        if local.exists():
-            return local
+        from app.services.storage import LocalStorage  # noqa: PLC0415
+
+        if isinstance(self.storage, LocalStorage):
+            return self.storage._path(key)
         target = scratch / "source.mp4"
         with self.storage.open(key) as src, target.open("wb") as dst:
             shutil.copyfileobj(src, dst, length=1024 * 1024)

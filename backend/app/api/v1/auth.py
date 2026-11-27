@@ -53,7 +53,7 @@ class SessionResponse(BaseModel):
 
 def _set_session_cookie(response: Response, settings, token: str) -> None:  # noqa: ANN001
     response.set_cookie(
-        key=SESSION_COOKIE,
+        key=settings.session_cookie_name,
         value=token,
         httponly=True,
         secure=settings.session_cookie_secure,
@@ -167,11 +167,12 @@ def logout_user(
     auth: AuthServiceDep,
     auth_ctx: AuthDep,
     _csrf: CSRFDep,
+    settings: SettingsDep,
 ) -> Response:
     """Revoke the session server-side. Clearing the cookie alone is not logout."""
     auth.logout(token=auth_ctx.session_token, ip=request.client.host if request.client else None)
     auth.db.commit()
-    response.delete_cookie(SESSION_COOKIE, path="/")
+    response.delete_cookie(settings.session_cookie_name, path="/")
     response.delete_cookie(CSRF_COOKIE, path="/")
     response.status_code = status.HTTP_204_NO_CONTENT
     return response

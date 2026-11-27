@@ -125,6 +125,8 @@ def extract_asr_audio(
         "-y",
         "-v",
         "error",
+        "-protocol_whitelist",
+        "file",
         "-i",
         str(source_path),
         "-vn",
