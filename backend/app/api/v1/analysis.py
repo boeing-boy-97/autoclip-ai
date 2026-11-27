@@ -158,9 +158,19 @@ def analyse_project(
     except AsrFailedError as exc:
         raise ApiError(exc.code, exc.detail, status_code=422) from exc
     except BrokerUnavailableError as exc:
-        # The job row is committed and PENDING, so the work is discoverable and retryable once
-        # the broker is back. Say that plainly instead of pretending the run started.
-        raise ApiError("queue_unavailable", str(exc), status_code=503) from exc
+        # A PENDING row cannot use the retry endpoint. Record a recoverable failure instead
+        # of stranding a job that was never delivered to the broker.
+        JobRepository(db).mark_failed(
+            workspace_id=workspace_id,
+            job_id=job_id,
+            code="queue_unavailable",
+            detail="the task queue is unavailable",
+            retryable=True,
+        )
+        db.commit()
+        raise ApiError(
+            "queue_unavailable", "the task queue is unavailable", status_code=503
+        ) from exc
 
     if task_id is not None:
         jobs = JobRepository(db)

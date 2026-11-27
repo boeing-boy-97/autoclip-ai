@@ -4,7 +4,7 @@ Turn one authorized long-form video into multiple professionally edited vertical
 video processing, a multimodal analysis pipeline, an independent quality-assurance stage, and official
 YouTube publishing.
 
-> **Status: working backend, end to end.** Authentication (opaque sessions, CSRF, rate limits),
+> **Status: implemented clipping workflow; production verification still required.** Authentication (opaque sessions, CSRF, rate limits),
 > workspaces and roles, project state machine, source ingestion with real FFprobe validation,
 > background analysis (Celery) with job control, clip generation and 9:16 rendering with burned-in
 > captions all run today; publishing is designed but not implemented. See
@@ -68,7 +68,7 @@ integrations (YouTube, paid AI) are reported as **not configured** rather than f
 
 ---
 
-## How it works
+## Product workflow (implemented and planned)
 
 ```
 SUBMIT VIDEO → UNDERSTAND → FIND MOMENTS → RANK → GENERATE CLIPS → EDIT → CHECK QUALITY
@@ -90,6 +90,11 @@ SUBMIT VIDEO → UNDERSTAND → FIND MOMENTS → RANK → GENERATE CLIPS → EDI
    persistent scheduler, quota-aware.
 7. **Learn** — YouTube Analytics sync feeds measured performance back into selection, with sample-size
    caveats and no causal claims.
+
+Steps 5–7 describe the target architecture, not completed capabilities. Current rendering uses a
+center crop, not subject tracking. Rendered/restored clips remain `AWAITING_REVIEW` and are not
+automatically publishable: independent QA, approval, publishing, and analytics are not implemented.
+Authenticated preview and MP4 download work through the media route for local storage or S3.
 
 Design details, including the state machine, data model invariants and failure-recovery model:
 [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md).
@@ -115,8 +120,8 @@ Design details, including the state machine, data model invariants and failure-r
 ## Repository layout
 
 ```
-backend/    FastAPI, Celery workers, FFmpeg/AI pipeline, QA, publishing
-frontend/   Next.js app (scaffold; Phase 1)
+backend/    FastAPI, Celery workers, FFmpeg/transcription/analysis/clip pipeline
+frontend/   Next.js app: auth, dashboard, projects, jobs, clip preview/download
 config/     scoring weights, analysis tuning, pricing, editing templates
 docs/       architecture, diagrams, OpenAPI contract, logging/testing/security/runbook
 ops/        verification and schema scripts, monitoring
@@ -147,3 +152,25 @@ storage for production.
 ## License
 
 Proprietary. All rights reserved.
+
+## Frontend development and quality checks
+
+Use Node 22.12+ (or Node 20.19+). From the repository root:
+
+```bash
+npm ci --prefix frontend
+npm --prefix frontend run dev -- --hostname 0.0.0.0
+npm --prefix frontend run lint
+npm --prefix frontend run typecheck
+npm --prefix frontend test
+npm --prefix frontend run build
+npm --prefix frontend start -- --hostname 0.0.0.0
+```
+
+The browser uses same-origin `/api/v1` requests. Set `API_INTERNAL_URL` **before building** the
+frontend when the backend is not at `http://127.0.0.1:8000`. The Docker build defaults to
+`http://api:8000`; override with `--build-arg API_INTERNAL_URL=...` for another internal host.
+A runtime-only environment change does not rebuild Next.js rewrites.
+
+See [the engineering audit](docs/ENGINEERING_AUDIT.md) for implemented repairs, actual test
+results, and outstanding production gates. The older status/review documents are historical.

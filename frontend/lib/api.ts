@@ -34,12 +34,11 @@ export function setCsrfToken(token: string | null): void {
 }
 
 export function getCsrfToken(): string | null {
-  if (csrfToken) return csrfToken;
-  if (typeof document === "undefined") return null;
+  if (typeof document === "undefined") return csrfToken;
   const match = document.cookie
     .split("; ")
     .find((part) => part.startsWith(`${CSRF_COOKIE}=`));
-  if (!match) return null;
+  if (!match) return csrfToken;
   csrfToken = decodeURIComponent(match.slice(CSRF_COOKIE.length + 1));
   return csrfToken;
 }
@@ -62,7 +61,9 @@ async function readError(response: Response): Promise<ApiError> {
     const payload = await response.json();
     code = payload.code ?? payload.type ?? code;
     detail = payload.detail ?? payload.title ?? detail;
-    if (Array.isArray(payload.errors)) {
+    if (Array.isArray(payload.fields)) {
+      fields = Object.fromEntries(payload.fields.map((item: { path: string; message: string }) => [item.path, item.message]));
+    } else if (Array.isArray(payload.errors)) {
       fields = {};
       for (const item of payload.errors) {
         const loc = Array.isArray(item.loc) ? item.loc.filter((p: unknown) => p !== "body") : [];

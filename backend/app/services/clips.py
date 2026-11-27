@@ -340,8 +340,10 @@ class ClipService:
             clip.start_ms = start_ms
             clip.end_ms = end_ms
             clip.duration_ms = end_ms - start_ms
-            clip.state = "QA_PASSED"  # technical verification passed inside render_clip
-            clip.publishable = True
+            # Encoding checks are not the independent QA/approval gate. Until that gate
+            # exists, renders are reviewable/downloadable but never automatically publishable.
+            clip.state = "AWAITING_REVIEW"
+            clip.publishable = False
             clip.meta = {
                 **(clip.meta or {}),
                 "captions": {
@@ -449,8 +451,8 @@ class ClipService:
             )
         previous = clip.current_version_id
         clip.current_version_id = version.id
-        clip.state = "QA_PASSED" if version.video_asset_id else clip.state
-        clip.publishable = bool(version.video_asset_id)
+        clip.state = "AWAITING_REVIEW" if version.video_asset_id else clip.state
+        clip.publishable = False
         clip.meta = {
             **(clip.meta or {}),
             "restored_from_version_id": str(previous) if previous else None,

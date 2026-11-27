@@ -235,8 +235,8 @@ class TestRendering:
         after = alice.client.get(
             f"/api/v1/workspaces/{alice.workspace_id}/clips/{clip['id']}", headers=alice.headers
         ).json()
-        assert after["state"] == "QA_PASSED"
-        assert after["publishable"] is True
+        assert after["state"] == "AWAITING_REVIEW"
+        assert after["publishable"] is False
         assert after["current_version_id"] is not None
         assert after["metadata"]["captions"]["cue_count"] >= 1
 

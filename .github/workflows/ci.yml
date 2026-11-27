@@ -226,7 +226,7 @@ jobs:
         working-directory: frontend
         run: |
           if [ -f package.json ]; then
-            npx tsc --noEmit && npm run build
+            npm run lint && npm run typecheck && npm test && npm run build
           else
             echo "skipped — Phase 1"
           fi

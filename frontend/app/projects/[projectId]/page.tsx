@@ -38,6 +38,7 @@ export default function ProjectPage() {
   const [job, setJob] = useState<Job | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
+  const [pollVersion, setPollVersion] = useState(0);
   const [busy, setBusy] = useState<string | null>(null);
   const timer = useRef<ReturnType<typeof setTimeout> | null>(null);
 
@@ -65,11 +66,11 @@ export default function ProjectPage() {
 
   const loadJob = useCallback(async () => {
     if (!base) return null;
-    const page = await api<Page<Job>>(`${base}/jobs?limit=1`);
+    const page = await api<Page<Job>>(`${base}/jobs?limit=1&project_id=${projectId}`);
     const newest = page.items[0] ?? null;
     setJob(newest);
     return newest;
-  }, [base]);
+  }, [base, projectId]);
 
   useEffect(() => {
     if (!base) return;
@@ -108,7 +109,7 @@ export default function ProjectPage() {
       cancelled = true;
       if (timer.current) clearTimeout(timer.current);
     };
-  }, [base, loadAll, loadJob]);
+  }, [base, loadAll, loadJob, pollVersion]);
 
   async function run(action: () => Promise<unknown>, label: string) {
     setBusy(label);
@@ -116,12 +117,9 @@ export default function ProjectPage() {
     setNotice(null);
     try {
       await action();
-      const current = await loadJob();
       await loadAll();
-      if (current && !isTerminalJob(current)) {
-        if (timer.current) clearTimeout(timer.current);
-        timer.current = setTimeout(() => void loadJob().then(() => loadAll()), 1500);
-      }
+      // Restart the same bounded polling loop after a newly dispatched job.
+      setPollVersion((version) => version + 1);
     } catch (err) {
       setError(err instanceof ApiError ? `${err.detail} (${err.code})` : "That did not work.");
     } finally {

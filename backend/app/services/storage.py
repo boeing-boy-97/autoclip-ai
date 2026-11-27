@@ -4,7 +4,7 @@ Guarantees
 ----------
 * Keys are always generated server-side from UUIDs. User-supplied strings (filenames, project
   names) never become part of a path, which removes path traversal as a category of bug.
-* Nothing is ever served by the API process: callers receive short-lived signed URLs.
+* Production callers receive short-lived signed URLs; local media is served after authorization.
 * The local backend refuses to start in production (enforced in Settings).
 """
 
@@ -75,7 +75,7 @@ class LocalStorage(Storage):
     def _path(self, key: str) -> Path:
         # Defence in depth: even though keys are generated, verify containment.
         candidate = (self.root / key).resolve()
-        if not str(candidate).startswith(str(self.root)):
+        if not candidate.is_relative_to(self.root) or candidate == self.root:
             raise StorageError("resolved path escapes the storage root")
         return candidate
 

@@ -2,7 +2,7 @@
 
 import Link from "next/link";
 import { usePathname, useRouter } from "next/navigation";
-import { useEffect } from "react";
+import { useEffect, useState } from "react";
 
 import { useSession } from "@/lib/session";
 
@@ -16,6 +16,8 @@ const PUBLIC_PATHS = ["/login", "/register"];
 
 export function Shell({ children }: { children: React.ReactNode }) {
   const { status, workspace, workspaces, logout, selectWorkspace } = useSession();
+  const [logoutError, setLogoutError] = useState<string | null>(null);
+  const [signingOut, setSigningOut] = useState(false);
   const pathname = usePathname();
   const router = useRouter();
   const isPublic = PUBLIC_PATHS.includes(pathname);
@@ -54,9 +56,10 @@ export function Shell({ children }: { children: React.ReactNode }) {
           <span className="brand-mark">A</span> AutoClipper
         </Link>
 
-        <nav className="nav">
+        <nav className="nav" aria-label="Main navigation">
           {NAV.map((item) => (
             <Link
+              aria-current={pathname === item.href ? "page" : undefined}
               key={item.href}
               href={item.href}
               data-active={pathname === item.href || pathname.startsWith(`${item.href}/`)}
@@ -83,13 +86,20 @@ export function Shell({ children }: { children: React.ReactNode }) {
           ) : (
             <div className="faint truncate">{workspace?.name}</div>
           )}
-          <button className="btn btn-sm" onClick={() => void logout()}>
-            Sign out
+          {logoutError && <div role="alert" className="error-text">{logoutError}</div>}
+          <button className="btn btn-sm" disabled={signingOut} onClick={async () => {
+            setSigningOut(true);
+            setLogoutError(null);
+            try { await logout(); }
+            catch { setLogoutError("Sign out failed. Please try again."); }
+            finally { setSigningOut(false); }
+          }}>
+            {signingOut ? "Signing out…" : "Sign out"}
           </button>
         </div>
       </aside>
 
-      <main className="main">{children}</main>
+      <main className="main" key={workspace?.id}>{children}</main>
     </div>
   );
 }
