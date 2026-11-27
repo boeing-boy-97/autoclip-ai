@@ -126,6 +126,17 @@ Platform wiring:
 | Fly | `[deploy] release_command = "/app/scripts/release.sh"` in `fly.toml` |
 | Heroku | `release: cd backend && ./scripts/release.sh` in the `Procfile` |
 
+The migration role must be allowed to install the extensions the schema needs — `pgcrypto`,
+`citext`, `pg_trgm`, and `vector` if you use pgvector. On a managed Postgres the application role
+often cannot (`CREATE EXTENSION` needs superuser), so create them once, before the first release:
+
+```sql
+CREATE EXTENSION IF NOT EXISTS pgcrypto;
+CREATE EXTENSION IF NOT EXISTS citext;      -- case-insensitive emails
+CREATE EXTENSION IF NOT EXISTS pg_trgm;     -- transcript full-text index
+CREATE EXTENSION IF NOT EXISTS vector;      -- optional, pgvector
+```
+
 The hook reads `DATABASE_URL_MIGRATIONS` (falling back to `DATABASE_URL`) straight from the
 environment and needs nothing else — a missing Redis or S3 setting fails the **web** deploy, with
 the message about that variable, instead of surfacing here as a confusing migration error.

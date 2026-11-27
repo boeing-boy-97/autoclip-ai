@@ -43,7 +43,9 @@ bad() {
 log "creating two empty databases"
 # The migration runs as an ordinary role, not the superuser, so it has to exist.
 if ! run_pg -tAc "SELECT 1 FROM pg_roles WHERE rolname='${DB_USER}'" | grep -q 1; then
-  run_pg -c "CREATE ROLE ${DB_USER} LOGIN PASSWORD '${DB_PASS}';" >/dev/null
+  # Superuser because the baseline migration installs extensions (pgcrypto, citext, pg_trgm) —
+  # this is a throwaway role on two throwaway databases.
+  run_pg -c "CREATE ROLE ${DB_USER} LOGIN SUPERUSER PASSWORD '${DB_PASS}';" >/dev/null
   ok "created role ${DB_USER}"
 fi
 run_pg -c "DROP DATABASE IF EXISTS ${DB_MIG} WITH (FORCE);" >/dev/null
