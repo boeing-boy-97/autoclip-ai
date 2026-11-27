@@ -89,11 +89,16 @@ executes. New in this pass:
    storage in production, S3 not configured. Warnings (startup continues): missing FFmpeg, empty ASR
    weight cache, public docs in production, wildcard `TRUSTED_HOSTS`, insecure session cookie, rate
    limiting disabled, `TMP_ROOT` smaller than `MAX_UPLOAD_MB`. Each is logged as `app.preflight`.
+   The checks are role-aware: each script exports `AUTOCLIP_PROCESS`, so the API is not warned about
+   Whisper weights it never loads and the worker is not warned about `/docs` it does not serve.
 5. `backend/Dockerfile` — `production` is now the **last** stage; with `dev` last, a plain cloud build
    silently deployed a `--reload` server. Non-root uid 10001, `tini`, HEALTHCHECK on
    `/api/v1/health/readyz`.
-6. `docs/DEPLOY.md` + `deploy/fly.toml.example` — component table, full env list, per-platform release
-   hook and start commands, troubleshooting table keyed on the exact log lines above.
+6. `docs/DEPLOY.md`, `deploy/render.yaml` and `deploy/fly.toml.example` — component table, full env
+   list, per-platform release hook and start commands, and a troubleshooting table keyed on the exact
+   log lines above. Both blueprints mount the volume on the **worker only**, because a Render disk
+   attaches to a single service and a Fly volume to a single machine; mounting one shared `/data` in
+   every process either fails the deploy or silently splits the state.
 
 Verified here with real processes (no Docker, no database): the API started through
 `./scripts/start_api.sh` and answered `livez` 200 with `/docs` 200 in development; the same binary

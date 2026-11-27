@@ -11,6 +11,8 @@ set -Eeuo pipefail
 
 cd "$(dirname "${BASH_SOURCE[0]}")/.."   # -> backend/
 
+export AUTOCLIP_PROCESS="beat"
+
 PYTHON="${PYTHON_BIN:-python}"
 SCHEDULE="${CELERY_BEAT_SCHEDULE:-${TMP_ROOT:-/tmp/autoclip}/celerybeat-schedule}"
 mkdir -p "$(dirname "${SCHEDULE}")"

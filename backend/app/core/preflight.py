@@ -13,12 +13,19 @@ Two severities:
   warning rather than an error so an API-only deployment can still boot (its readiness stays 503
   until FFmpeg is installed, which is exactly the signal an operator needs).
 
+The checks are role-aware. One image runs three kinds of process, and a check that matters for one
+is noise for another: a worker has no HTTP surface (so published `/docs` and a wildcard
+`TRUSTED_HOSTS` are irrelevant to it) and the API never loads Whisper weights (so an empty
+`ASR_MODEL_DIR` is not its problem). Each entrypoint script exports `AUTOCLIP_PROCESS`
+(`api` / `worker` / `beat`); without it the checks assume `api`, which is the safer default.
+
 The check is deliberately side-effect-light: it creates the scratch/storage directories (a process
 that must write there may as well ensure they exist) but never deletes anything.
 """
 
 from __future__ import annotations
 
+import os
 import shutil
 from dataclasses import dataclass
 from pathlib import Path
@@ -27,6 +34,9 @@ from typing import Literal
 from app.core.config import Settings
 
 Level = Literal["error", "warning"]
+ProcessRole = Literal["api", "worker", "beat"]
+
+_ROLES: tuple[ProcessRole, ...] = ("api", "worker", "beat")
 
 
 @dataclass(frozen=True, slots=True)
@@ -34,6 +44,12 @@ class Issue:
     level: Level
     code: str
     detail: str
+
+
+def process_role() -> ProcessRole:
+    """Which kind of process is booting, from `AUTOCLIP_PROCESS` (set by the entrypoint scripts)."""
+    value = os.environ.get("AUTOCLIP_PROCESS", "").strip().lower()
+    return value if value in _ROLES else "api"
 
 
 def _usable_dir(path: Path) -> int | None:
@@ -51,8 +67,9 @@ def _usable_dir(path: Path) -> int | None:
         return None
 
 
-def check(settings: Settings) -> list[Issue]:
-    """Return every environment problem worth reporting, most severe first."""
+def check(settings: Settings, role: ProcessRole | None = None) -> list[Issue]:
+    """Return every environment problem worth reporting for `role`, most severe first."""
+    role = role or process_role()
     issues: list[Issue] = []
 
     # ---------------------------------------------------------------- scratch space
@@ -115,7 +132,7 @@ def check(settings: Settings) -> list[Issue]:
         for name, binary in (("ffmpeg", settings.ffmpeg_bin), ("ffprobe", settings.ffprobe_bin))
         if shutil.which(binary) is None
     ]
-    if missing:
+    if missing and role != "beat":
         issues.append(
             Issue(
                 "warning",
@@ -129,7 +146,8 @@ def check(settings: Settings) -> list[Issue]:
         )
 
     # ---------------------------------------------------------------- ASR weights
-    if settings.asr_provider == "local":
+    # Only the worker loads the model; the API would warn about a directory it never reads.
+    if settings.asr_provider == "local" and role == "worker":
         model_dir = Path(settings.asr_model_dir)
         populated = False
         try:
@@ -148,7 +166,8 @@ def check(settings: Settings) -> list[Issue]:
             )
 
     # ---------------------------------------------------------------- exposure
-    if settings.environment == "production":
+    # HTTP-only concerns: a worker or beat process serves no requests.
+    if settings.environment == "production" and role == "api":
         if settings.docs_enabled:
             issues.append(
                 Issue(
@@ -186,7 +205,7 @@ def check(settings: Settings) -> list[Issue]:
         settings.rate_limit_analysis_per_hour,
         settings.rate_limit_render_per_minute,
     )
-    if not any(limits):
+    if not any(limits) and role == "api":
         issues.append(
             Issue(
                 "warning",
@@ -204,4 +223,4 @@ def fatal(issues: list[Issue]) -> list[Issue]:
     return [issue for issue in issues if issue.level == "error"]
 
 
-__all__ = ["Issue", "check", "fatal"]
+__all__ = ["Issue", "ProcessRole", "check", "fatal", "process_role"]

@@ -24,6 +24,9 @@ set -Eeuo pipefail
 
 cd "$(dirname "${BASH_SOURCE[0]}")/.."   # -> backend/
 
+# Tells app/core/preflight.py which checks apply to this process (see the module docstring).
+export AUTOCLIP_PROCESS="api"
+
 PORT="${PORT:-8000}"
 WORKERS="${WEB_CONCURRENCY:-1}"
 PYTHON="${PYTHON_BIN:-python}"

@@ -1,0 +1,167 @@
+# Render Blueprint — one Docker image, four process types (api, worker, beat, release).
+#
+#   Render Dashboard → New → Blueprint → point it at this repository (it reads `render.yaml`
+#   from the root). Then fill in the values marked `sync: false`.
+#
+# Why the shape is what it is:
+#   * One image, three services. The web service never runs Celery, and the workers never serve
+#     HTTP — that is what lets each scale independently and keeps a slow render from blocking
+#     logins.
+#   * `preDeployCommand` applies migrations once, before the new instances take traffic, from
+#     `release.sh` (advisory-locked, so a rolling deploy cannot run it twice).
+#   * A disk attaches to exactly ONE service on Render, so the volume sits on the worker (which
+#     caches multi-GB Whisper weights). The API and beat keep `TMP_ROOT` on ephemeral disk: S3 is
+#     the durable store, and scratch space only has to outlive a single request.
+#   * `maxmemoryPolicy: noeviction` on the Key Value instance matters: it is the Celery broker, and
+#     an evicted task message is a job that silently never runs.
+#
+# Secrets marked `sync: false` are prompted for on first deploy and never read from git.
+# `generateValue: true` is deliberately NOT used for the three app secrets: this application
+# requires SECRET_KEY / SECRET_ENCRYPTION_KEY to be base64-encoded 32 bytes and PASSWORD_PEPPER to be
+# at least 16 characters, and it refuses to boot otherwise. Generate them:
+#
+#   python -c "import os,base64;print(base64.b64encode(os.urandom(32)).decode())"   # twice: the two keys
+#   python -c "import secrets;print(secrets.token_urlsafe(32))"                     # pepper
+
+services:
+  # ------------------------------------------------------------------------------- API (web)
+  - type: web
+    name: autoclip-api
+    runtime: docker
+    dockerfilePath: ./backend/Dockerfile
+    dockerContext: .
+    dockerCommand: /app/scripts/start_api.sh
+    healthCheckPath: /api/v1/health/readyz    # readiness, not liveness: 503 until DB/Redis/S3/FFmpeg work
+    preDeployCommand: /app/scripts/release.sh # requires a paid instance type; see DEPLOY.md if not
+    plan: starter
+    region: singapore
+    maxShutdownDelaySeconds: 60
+    envVars:
+      - fromGroup: autoclip-shared
+      - key: DATABASE_URL
+        fromDatabase:
+          name: autoclip-db
+          property: connectionString
+      - key: REDIS_URL
+        fromService:
+          type: keyvalue
+          name: autoclip-redis
+          property: connectionString
+
+  # ------------------------------------------------------------------------------- Celery worker
+  - type: worker
+    name: autoclip-worker
+    runtime: docker
+    dockerfilePath: ./backend/Dockerfile
+    dockerContext: .
+    dockerCommand: /app/scripts/start_worker.sh
+    plan: standard          # 2 GB: transcription loads Whisper and holds frames in memory
+    region: singapore
+    maxShutdownDelaySeconds: 300   # let a running transcode finish instead of killing it mid-write
+    disk:
+      name: autoclip-asr
+      mountPath: /data
+      sizeGB: 10
+    envVars:
+      - fromGroup: autoclip-shared
+      - key: WORKER_QUEUES
+        value: media,transcribe,analyze
+      - key: WORKER_CONCURRENCY
+        value: "1"
+      - key: MAX_TASKS_PER_CHILD
+        value: "20"
+      - key: DATABASE_URL
+        fromDatabase:
+          name: autoclip-db
+          property: connectionString
+      - key: REDIS_URL
+        fromService:
+          type: keyvalue
+          name: autoclip-redis
+          property: connectionString
+
+  # ------------------------------------------------------------------------------- Celery beat
+  # Exactly one instance, ever. Two schedulers double-fire the stuck-job sweeper.
+  - type: worker
+    name: autoclip-beat
+    runtime: docker
+    dockerfilePath: ./backend/Dockerfile
+    dockerContext: .
+    dockerCommand: /app/scripts/start_beat.sh
+    plan: starter
+    region: singapore
+    numInstances: 1
+    envVars:
+      - fromGroup: autoclip-shared
+      - key: DATABASE_URL
+        fromDatabase:
+          name: autoclip-db
+          property: connectionString
+      - key: REDIS_URL
+        fromService:
+          type: keyvalue
+          name: autoclip-redis
+          property: connectionString
+
+  # ------------------------------------------------------------------------------- broker
+  - type: keyvalue
+    name: autoclip-redis
+    plan: starter
+    region: singapore
+    maxmemoryPolicy: noeviction
+    ipAllowList: []          # internal access only
+
+envVarGroups:
+  - name: autoclip-shared
+    envVars:
+      - key: ENVIRONMENT
+        value: production
+      - key: SESSION_COOKIE_SECURE
+        value: "true"
+      - key: DOCS_ENABLED
+        value: "false"
+      - key: FORWARDED_ALLOW_IPS
+        value: "*"           # Render's proxy sets X-Forwarded-For; without this every client looks alike
+      - key: TRUSTED_HOSTS
+        sync: false          # e.g. autoclip-api.onrender.com — not "*"
+      - key: WEB_CONCURRENCY
+        value: "1"
+      - key: TMP_ROOT
+        value: /tmp/autoclip
+      - key: ASR_MODEL_DIR
+        value: /data/asr-models   # exists only on the worker, which is the only process that reads it
+      - key: MAX_UPLOAD_MB
+        value: "512"
+
+      # --- object storage (required: local storage is refused in production) ---
+      - key: STORAGE_BACKEND
+        value: s3
+      - key: S3_BUCKET
+        sync: false
+      - key: S3_REGION
+        value: auto           # "auto" for Cloudflare R2, otherwise the bucket's region
+      - key: S3_ENDPOINT_URL
+        sync: false           # omit for AWS S3
+      - key: S3_FORCE_PATH_STYLE
+        value: "false"        # "true" for MinIO
+      - key: S3_ACCESS_KEY_ID
+        sync: false
+      - key: S3_SECRET_ACCESS_KEY
+        sync: false
+
+      # --- application secrets (see the generation commands at the top of this file) ---
+      - key: SECRET_KEY
+        sync: false
+      - key: SECRET_ENCRYPTION_KEY
+        sync: false
+      - key: PASSWORD_PEPPER
+        sync: false
+
+databases:
+  - name: autoclip-db
+    plan: basic-256mb
+    region: singapore
+    postgresMajorVersion: "16"
+    # The schema needs the `vector` extension (pgvector). Render's managed Postgres ships it; if the
+    # migration reports "extension vector is not available", enable it once from the dashboard's
+    # psql shell:  CREATE EXTENSION IF NOT EXISTS vector;

@@ -14,6 +14,8 @@ set -Eeuo pipefail
 
 cd "$(dirname "${BASH_SOURCE[0]}")/.."   # -> backend/
 
+export AUTOCLIP_PROCESS="worker"
+
 QUEUES="${WORKER_QUEUES:-media,transcribe,analyze}"
 CONCURRENCY="${WORKER_CONCURRENCY:-2}"
 NAME="${WORKER_NAME:-worker}"

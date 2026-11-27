@@ -82,9 +82,10 @@ async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
     # /health/readyz; a fatal issue refuses the start, because accepting traffic that cannot upload
     # or render only converts a deploy-time misconfiguration into a user-visible outage.
     issues = preflight.check(s)
+    role = preflight.process_role()
     for issue in issues:
         (log.error if issue.level == "error" else log.warning)(
-            "app.preflight", code=issue.code, detail=issue.detail
+            "app.preflight", process=role, code=issue.code, detail=issue.detail
         )
     blocking = preflight.fatal(issues)
     if blocking:

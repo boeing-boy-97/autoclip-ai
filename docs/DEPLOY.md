@@ -21,10 +21,11 @@ If you would rather avoid Docker entirely, see [§8 Buildpack deploys](#8-buildp
 | **PostgreSQL** | 1 | must have `citext` **and** `vector` extensions (pgvector) |
 | **Redis** | 1 | sessions, login throttle, rate limits, Celery broker + result backend |
 | **Object storage** | 1 | S3-compatible (S3, R2, Neon storage, MinIO…) — **required in production** |
-| **Persistent disk** | 1 (recommended) | `TMP_ROOT` scratch + `ASR_MODEL_DIR` weights + beat schedule |
+| **Persistent disk** | 1 (recommended) | on the **worker**: the Whisper weight cache. Scratch space can stay ephemeral |
 
 The API and the workers are **different services from the same image**. On every platform below the
-only difference is the start command.
+only difference is the start command. Two ready-made blueprints encode all of this:
+[`deploy/render.yaml`](../deploy/render.yaml) and [`deploy/fly.toml.example`](../deploy/fly.toml.example).
 
 > **The web service must not run workers.** A `WEB_CONCURRENCY`-scaled API that also ran Celery would
 > process each job N times and block request handling behind a transcription.
@@ -73,10 +74,10 @@ UVICORN_KEEP_ALIVE=75                                   # must exceed the proxy'
 FORWARDED_ALLOW_IPS=*                                   # behind the platform proxy
 TRUSTED_HOSTS=api.yourdomain.com                        # not '*'
 DOCS_ENABLED=false                                      # keep the API map private
-TMP_ROOT=/data/tmp                                      # on the mounted disk
-ASR_MODEL_DIR=/data/asr-models                          # on the mounted disk
-MAX_UPLOAD_MB=512                                       # must fit the disk you mounted
-CELERY_BEAT_SCHEDULE=/data/celerybeat-schedule
+TMP_ROOT=/tmp/autoclip                                  # scratch; S3 is the durable store
+ASR_MODEL_DIR=/data/asr-models                          # on the worker's disk (read by the worker only)
+MAX_UPLOAD_MB=512                                       # must fit the scratch space
+# CELERY_BEAT_SCHEDULE defaults to $TMP_ROOT/celerybeat-schedule — fine on ephemeral disk
 
 # --- worker shape ---
 WORKER_QUEUES=media,transcribe,analyze
@@ -146,20 +147,28 @@ The build is always: **Dockerfile `backend/Dockerfile`**, context **repository r
 | Beat | `/app/scripts/start_beat.sh` |
 | Release | `/app/scripts/release.sh` |
 
-**Render** — create a *Web Service* (Docker, Dockerfile path `backend/Dockerfile`, Docker context
-`.`, health check `/api/v1/health/readyz`), a *Background Worker* with the same image and the worker
-command, and a second background worker with `numInstances: 1` for beat. Add a persistent disk
-mounted at `/data` to the API and worker services.
+Each process declares what it is (`AUTOCLIP_PROCESS=api|worker|beat`, exported by the script), which
+is how the startup self-check knows which warnings apply: the API is not nagged about Whisper
+weights it never loads, and the worker is not nagged about `/docs` it does not serve.
+
+**Render** — the blueprint `deploy/render.yaml` creates the whole stack in one step: web service
+(Docker, `backend/Dockerfile`, health check `/api/v1/health/readyz`, `preDeployCommand`
+`/app/scripts/release.sh`), worker, beat (`numInstances: 1`), a Key Value instance as broker, and a
+managed Postgres. Create it with *New → Blueprint*, then fill in the values marked `sync: false`
+(the three app secrets and the S3 credentials). By hand, the equivalent is: a *Web Service*, a
+*Background Worker* with the same image and the worker command, a second background worker pinned to
+one instance for beat, and a persistent disk **on the worker only**.
 
 **Railway** — one project, three services from the same repo. Each service: builder "Dockerfile",
 `dockerfilePath = backend/Dockerfile`, and a custom start command per the table above. Add the
-Redis and Postgres plugins, and a volume mounted at `/data` on the worker service.
+Redis and Postgres plugins, and a volume mounted at `/data` on the worker service. Railway injects
+`PORT`; nothing else is needed.
 
 **Fly.io** — copy `deploy/fly.toml.example` to `fly.toml`, set the app name and region, then:
 
 ```bash
-fly launch --no-deploy            # or: fly apps create <name>
-fly volumes Create data --size 20 # persistent disk for TMP_ROOT / ASR models
+fly launch --no-deploy                  # or: fly apps create <name>
+fly volumes create data --size 10       # worker only: the Whisper cache
 fly secrets set SECRET_KEY=... SECRET_ENCRYPTION_KEY=... PASSWORD_PEPPER=... \
                 DATABASE_URL=... REDIS_URL=... S3_...
 fly deploy
@@ -179,9 +188,15 @@ The three things that only fail on a PaaS:
 
 1. **Scratch space.** Uploads spool to `TMP_ROOT` (bounded by `MAX_UPLOAD_MB`) and renders write
    their output there. An ephemeral disk is typically 512 MB–1 GB, so a 4 GB upload limit guarantees
-   `ENOSPC`. Mount a disk and set `MAX_UPLOAD_MB` to something the disk can hold with headroom.
-   The app now refuses to start if `TMP_ROOT` is unwritable, and warns when the free space is
-   smaller than `MAX_UPLOAD_MB`.
+   `ENOSPC`. `TMP_ROOT` does not have to be shared between processes — the durable copy is in S3 — so
+   the default layout is `/tmp/autoclip` on the API and beat, and a disk on the worker only. Set
+   `MAX_UPLOAD_MB` to what that scratch space can hold with headroom, or mount a disk on the API too
+   if clients upload very large files. The app refuses to start if `TMP_ROOT` is unwritable and warns
+   when its free space is smaller than `MAX_UPLOAD_MB`.
+
+   A related platform rule: **a disk attaches to one service** (Render) or one machine (Fly). A
+   blueprint that mounts the same volume in the API *and* the worker either fails to deploy or
+   silently serves two divergent copies — which is why both examples put `/data` on the worker.
 2. **FFmpeg.** The Docker image installs it. A buildpack deploy does not — `/health/readyz` stays
    503 and every upload 503s with `media_tooling_unavailable`. This is the most common "it works
    locally" failure.
@@ -189,8 +204,8 @@ The three things that only fail on a PaaS:
    On ephemeral storage that repeats on every deploy (slow, and billed as egress). Put it on the
    disk, or use `ASR_PROVIDER=openai` and pay per minute of audio instead.
 
-Startup logs a `app.preflight` warning for each of these, so check the deploy log rather than
-guessing.
+Startup logs an `app.preflight` line for each of these — with `process=api|worker|beat`, so a
+warning is attributable to the service that owns it. Read the deploy log rather than guessing.
 
 ---
 

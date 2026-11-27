@@ -17,6 +17,7 @@ import tomllib
 from pathlib import Path
 
 import pytest
+import yaml
 
 pytestmark = pytest.mark.unit
 
@@ -96,7 +97,8 @@ class TestPreflight:
         monkeypatch.setattr(preflight.shutil, "which", lambda _: "/usr/bin/ffmpeg")
         (tmp_path / "models").mkdir()
         issues = preflight.check(
-            settings_for(tmp_path, asr_provider="local", asr_model_dir=str(tmp_path / "models"))
+            settings_for(tmp_path, asr_provider="local", asr_model_dir=str(tmp_path / "models")),
+            role="worker",
         )
         assert "asr_model_cache_missing" in {issue.code for issue in issues}
 
@@ -107,7 +109,8 @@ class TestPreflight:
         models = tmp_path / "models"
         (models / "models--Systran--faster-whisper-large-v3").mkdir(parents=True)
         issues = preflight.check(
-            settings_for(tmp_path, asr_provider="local", asr_model_dir=str(models))
+            settings_for(tmp_path, asr_provider="local", asr_model_dir=str(models)),
+            role="worker",
         )
         assert "asr_model_cache_missing" not in {issue.code for issue in issues}
 
@@ -146,6 +149,62 @@ class TestPreflight:
             )
         )
         assert "rate_limiting_disabled" in {issue.code for issue in issues}
+
+    def test_a_worker_is_not_warned_about_http_only_settings(self, tmp_path, monkeypatch):
+        """A worker serves no HTTP: published docs and a wildcard Host list are not its problem."""
+        from app.core import preflight
+
+        monkeypatch.setattr(preflight.shutil, "which", lambda _: "/usr/bin/ffmpeg")
+        issues = preflight.check(
+            settings_for(
+                tmp_path,
+                environment="production",
+                storage_backend="s3",
+                s3_bucket="b",
+                s3_access_key_id="k",
+                s3_secret_access_key="s",
+                session_cookie_secure=True,
+                docs_enabled=True,
+                trusted_hosts="*",
+                rate_limit_per_minute=0,
+                rate_limit_upload_per_hour=0,
+                rate_limit_auth_per_minute=0,
+                rate_limit_analysis_per_hour=0,
+                rate_limit_render_per_minute=0,
+            ),
+            role="worker",
+        )
+        assert issues == [], issues
+
+    def test_the_api_is_not_warned_about_the_asr_cache_it_never_reads(self, tmp_path, monkeypatch):
+        from app.core import preflight
+
+        monkeypatch.setattr(preflight.shutil, "which", lambda _: "/usr/bin/ffmpeg")
+        (tmp_path / "models").mkdir()
+        issues = preflight.check(
+            settings_for(tmp_path, asr_provider="local", asr_model_dir=str(tmp_path / "models")),
+            role="api",
+        )
+        assert "asr_model_cache_missing" not in {issue.code for issue in issues}
+
+    def test_the_worker_still_checks_the_scratch_directory(self, tmp_path, monkeypatch):
+        from app.core import preflight
+
+        monkeypatch.setattr(preflight.shutil, "which", lambda _: "/usr/bin/ffmpeg")
+        blocked = tmp_path / "blocked"
+        blocked.write_text("x")
+        issues = preflight.check(settings_for(tmp_path, tmp_root=str(blocked / "t")), role="worker")
+        assert "tmp_root_unusable" in {issue.code for issue in preflight.fatal(issues)}
+
+    @pytest.mark.parametrize(
+        ("env", "expected"),
+        [("worker", "worker"), ("BEAT", "beat"), ("nonsense", "api"), ("", "api")],
+    )
+    def test_role_is_read_from_the_environment(self, monkeypatch, env, expected):
+        from app.core import preflight
+
+        monkeypatch.setenv("AUTOCLIP_PROCESS", env)
+        assert preflight.process_role() == expected
 
     def test_errors_are_reported_before_warnings(self, tmp_path, monkeypatch):
         from app.core import preflight
@@ -264,6 +323,14 @@ class TestProcessEntrypoints:
         for queue in ("media", "transcribe", "analyze"):
             assert queue in JobRepository.ACTIVE_QUEUES
 
+    @pytest.mark.parametrize(
+        ("script", "role"),
+        [("start_api.sh", "api"), ("start_worker.sh", "worker"), ("start_beat.sh", "beat")],
+    )
+    def test_entrypoints_declare_their_process_role(self, script: str, role: str):
+        body = (SCRIPTS / script).read_text()
+        assert f'AUTOCLIP_PROCESS="{role}"' in body
+
     def test_beat_script_uses_a_configurable_schedule_path(self):
         body = (SCRIPTS / "start_beat.sh").read_text()
         assert "CELERY_BEAT_SCHEDULE" in body
@@ -300,10 +367,87 @@ class TestFlyBlueprint:
         assert data["http_service"]["internal_port"] == 8000
         assert data["http_service"]["checks"][0]["path"] == "/api/v1/health/readyz"
 
+    def test_volume_is_mounted_only_where_it_is_used(self):
+        """A Fly volume attaches to one machine; mounting it in every process fails the deploy."""
+        data = tomllib.loads((REPO_ROOT / "deploy" / "fly.toml.example").read_text())
+        assert [mount["processes"] for mount in data["mounts"]] == [["worker"]]
+
+    def test_no_process_is_pointed_at_a_directory_it_does_not_have(self):
+        """Only the worker has /data; the API and beat must keep their state on ephemeral disk."""
+        data = tomllib.loads((REPO_ROOT / "deploy" / "fly.toml.example").read_text())
+        env = data["env"]
+        assert not env["TMP_ROOT"].startswith("/data")
+        assert "CELERY_BEAT_SCHEDULE" not in env
+
     def test_worker_process_warns_that_beat_must_not_scale(self):
         body = (REPO_ROOT / "deploy" / "fly.toml.example").read_text()
         assert "beat" in body
         assert "never" in body.lower()
+
+
+class TestRenderBlueprint:
+    @pytest.fixture(scope="class")
+    @classmethod
+    def data(cls) -> dict:
+        return yaml.safe_load((REPO_ROOT / "deploy" / "render.yaml").read_text())
+
+    def test_services_are_the_four_process_types(self, data):
+        kinds = [(svc["type"], svc["name"]) for svc in data["services"]]
+        assert kinds == [
+            ("web", "autoclip-api"),
+            ("worker", "autoclip-worker"),
+            ("worker", "autoclip-beat"),
+            ("keyvalue", "autoclip-redis"),
+        ]
+
+    def test_web_service_builds_the_shared_image(self, data):
+        web = data["services"][0]
+        assert web["runtime"] == "docker"
+        assert web["dockerfilePath"] == "./backend/Dockerfile"
+        assert web["dockerContext"] == "."
+        assert web["dockerCommand"] == "/app/scripts/start_api.sh"
+        assert web["healthCheckPath"] == "/api/v1/health/readyz"
+
+    def test_migrations_run_as_a_pre_deploy_command(self, data):
+        assert data["services"][0]["preDeployCommand"].endswith("release.sh")
+
+    def test_beat_is_pinned_to_one_instance(self, data):
+        beat = next(svc for svc in data["services"] if svc["name"] == "autoclip-beat")
+        assert beat["dockerCommand"] == "/app/scripts/start_beat.sh"
+        assert beat["numInstances"] == 1
+
+    def test_the_worker_owns_the_disk(self, data):
+        worker = next(svc for svc in data["services"] if svc["name"] == "autoclip-worker")
+        assert worker["disk"]["mountPath"] == "/data"
+        assert worker["maxShutdownDelaySeconds"] >= 120
+
+    def test_the_broker_never_evicts_a_queued_task(self, data):
+        redis = next(svc for svc in data["services"] if svc["name"] == "autoclip-redis")
+        assert redis["maxmemoryPolicy"] == "noeviction"
+        assert redis["ipAllowList"] == []
+
+    def test_secrets_are_never_committed(self, data):
+        shared = next(group for group in data["envVarGroups"] if group["name"] == "autoclip-shared")
+        by_key = {item["key"]: item for item in shared["envVars"]}
+        for secret in (
+            "SECRET_KEY",
+            "SECRET_ENCRYPTION_KEY",
+            "PASSWORD_PEPPER",
+            "S3_ACCESS_KEY_ID",
+            "S3_SECRET_ACCESS_KEY",
+            "TRUSTED_HOSTS",
+        ):
+            assert by_key[secret]["sync"] is False, secret
+            assert "value" not in by_key[secret], secret
+        # generateValue would produce a value the app rejects at boot (it needs base64 of 32 bytes).
+        assert not any(item.get("generateValue") for item in shared["envVars"])
+
+    def test_every_service_receives_the_database_url(self, data):
+        for svc in data["services"]:
+            if svc["type"] == "keyvalue":
+                continue
+            keys = {item["key"] for item in svc["envVars"] if "key" in item}
+            assert {"DATABASE_URL", "REDIS_URL"} <= keys, svc["name"]
 
 
 class TestDeployDocs:
