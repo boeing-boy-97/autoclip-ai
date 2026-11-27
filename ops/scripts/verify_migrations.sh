@@ -25,8 +25,10 @@ KEEP=0
 # Which psql talks to the cluster? Prefer PGHOST/PGUSER when they work (CI, compose, a remote
 # server); otherwise fall back to the developer's local cluster via the `postgres` OS user.
 if psql -X -q -At -c 'SELECT 1' -d postgres >/dev/null 2>&1; then
+  USE_ENV_PG=1
   run_pg() { psql "$@"; }
 else
+  USE_ENV_PG=0
   run_pg() { sudo -n -u "${PGSUPERUSER:-postgres}" "${PGBIN}/psql" -p "${PGPORT}" "$@"; }
 fi
 
@@ -84,10 +86,16 @@ if python3 -m alembic upgrade head >/tmp/drift_up2.log 2>&1; then ok "re-upgrade
 
 log "diffing DDL: migrated database vs schema.sql database"
 dump() {
-  sudo -n -u postgres ${PGBIN}/pg_dump -p "${PGPORT}" --schema-only --no-owner --no-privileges \
-    --schema=public "$1" 2>/dev/null \
-  | grep -vE '^(--|SET |SELECT pg_catalog|$)' \
-  | grep -vE '^\\(un)?restrict '
+  if [[ "${USE_ENV_PG}" -eq 1 ]]; then
+    pg_dump --schema-only --no-owner --no-privileges --schema=public "$1" 2>/dev/null \
+    | grep -vE '^(--|SET |SELECT pg_catalog|$)' \
+    | grep -vE '^\\(un)?restrict '
+  else
+    sudo -n -u "${PGSUPERUSER:-postgres}" "${PGBIN}/pg_dump" -p "${PGPORT}" --schema-only \
+      --no-owner --no-privileges --schema=public "$1" 2>/dev/null \
+    | grep -vE '^(--|SET |SELECT pg_catalog|$)' \
+    | grep -vE '^\\(un)?restrict '
+  fi
 }
 dump "${DB_MIG}" > /tmp/drift_migrated.sql
 dump "${DB_REF}" > /tmp/drift_reference.sql

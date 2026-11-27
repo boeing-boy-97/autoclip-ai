@@ -69,6 +69,20 @@ jobs:
           python-version: ${{ env.PYTHON_VERSION }}
           cache: pip
       - run: pip install -r backend/requirements-dev.txt pyyaml
+      # pg_dump must match the server's major version or it refuses to run, and the runner's
+      # default client is older than the pg17 service container.
+      - name: Install PostgreSQL 17 client
+        run: |
+          sudo install -d /usr/share/postgresql-common/pgdg
+          sudo curl -fsSL https://www.postgresql.org/media/keys/ACCC4CF8.asc \
+            -o /usr/share/postgresql-common/pgdg/apt.postgresql.org.asc
+          . /etc/os-release
+          echo "deb [signed-by=/usr/share/postgresql-common/pgdg/apt.postgresql.org.asc] \
+          https://apt.postgresql.org/pub/repos/apt ${VERSION_CODENAME}-pgdg main" \
+            | sudo tee /etc/apt/sources.list.d/pgdg.list >/dev/null
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq postgresql-client-17
+          psql --version && pg_dump --version
       - name: OpenAPI contract checks
         run: python3 ops/scripts/validate_openapi.py
       # Failures here are annotated with the first SQL error, so a red check is readable from the
@@ -118,6 +132,9 @@ jobs:
             exit 1
           fi
       # A bash script, not Python — calling it with python3 only ever produced a SyntaxError.
+      # Renders real media to prove the fixtures are valid, so FFmpeg is required.
+      - name: Install FFmpeg for the fixture check
+        run: sudo apt-get install -y -qq ffmpeg
       - name: Config file validity
         env:
           PGHOST: localhost
